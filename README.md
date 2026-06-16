@@ -3,11 +3,16 @@
 Página que identifica **en tiempo real con la cámara (sin sacar foto)** si lo que se muestra es:
 
 - **MRZ** — zona de lectura mecánica (pasaportes, DNI/ID, visados).
-- **BARCODE · EE.UU./Canadá** — licencia de conducir AAMVA (PDF417).
+- **BARCODE · EE.UU.** — licencia de conducir AAMVA de un estado de EE.UU. (PDF417).
+- **BARCODE · Canadá** — licencia de conducir AAMVA de una provincia canadiense (PDF417).
 - **BARCODE · Colombia** — cédula colombiana (PDF417 propietario).
 
-EE.UU./Canadá y Colombia usan ambos PDF417, así que parecen iguales: se distinguen por el
+Las licencias AAMVA y la cédula usan ambas PDF417, así que parecen iguales: se distinguen por el
 **contenido** del código (las licencias llevan la cabecera AAMVA `@…ANSI …`; la cédula no).
+Dentro de AAMVA, **EE.UU. y Canadá se separan por el IIN** (los 6 dígitos tras `ANSI `), que
+identifica la jurisdicción emisora; también se muestra el estado/provincia. Si el IIN no está en
+el registro AAMVA (p. ej. Territorios del Noroeste, sin IIN registrado) se etiqueta como genérico
+`EE.UU./Canadá` en lugar de adivinar el país.
 
 ## Cómo ejecutarlo
 

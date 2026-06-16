@@ -25,8 +25,10 @@ son PDF417 y parecen iguales, se leen de forma diferente.
 Dos detectores corren en paralelo sobre el vídeo en vivo:
 
 1. **Barcode (PDF417) con ZXing** — rápido. Al decodificar:
-   - Contenido con cabecera AAMVA (`@` inicial y/o `"ANSI "` + IIN) → **EE.UU./Canadá**.
-     Se muestra el IIN como dato extra (factual, no se adivina el estado/provincia).
+   - Contenido con cabecera AAMVA (`@` inicial y/o `"ANSI "` + IIN) → licencia. Se separa
+     **EE.UU. vs Canadá** mapeando el IIN (6 dígitos tras `ANSI `) a su jurisdicción mediante el
+     registro AAMVA embebido; se muestra estado/provincia. IIN no registrado → genérico
+     `EE.UU./Canadá` (no se adivina el país).
    - PDF417 que decodifica pero **no** es AAMVA → **Colombia (cédula)**.
 2. **MRZ con OCR ligero (Tesseract.js)** — sobre el fotograma reducido a escala de grises.
    No lee el texto completo; reconoce la *forma*: ≥2 líneas de 24–48 caracteres compuestas casi
@@ -48,5 +50,4 @@ HTML/JS puro. `@zxing/library@0.21.3` y `tesseract.js@5.1.1` por CDN (jsDelivr).
 ## Fuera de alcance
 
 - Extracción/validación de los datos del documento.
-- Distinguir EE.UU. de Canadá como etiquetas separadas (se agrupan, según el caso de uso).
 - Firma positiva del formato de la Registraduría (mejora futura si entran más barcodes).
