@@ -54,6 +54,11 @@
     border: 1px solid #2d3a47; font-size: 16px; cursor: pointer; }
   #status { padding: 8px 12px; font-size: 13px; color: #9ca3af; background: #0b0f14;
     border-top: 1px solid #1f2933; text-align: center; min-height: 1.2em; }
+  #ver { position: absolute; left: 8px; bottom: 8px; z-index: 4; font: 11px/1 monospace;
+    color: #cbd5e1; background: rgba(0,0,0,.5); padding: 3px 6px; border-radius: 6px; pointer-events: none; }
+  #debug { max-height: 28vh; overflow: auto; margin: 0; padding: 8px 12px;
+    font: 11px/1.45 ui-monospace, Menlo, Consolas, monospace; color: #cbd5e1; background: #0b0f14;
+    border-top: 1px solid #1f2933; white-space: pre-wrap; word-break: break-all; }
 
   /* Start screen */
   #start { position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -69,6 +74,7 @@
     <video id="video" playsinline muted autoplay></video>
     <img id="photo" alt="">
     <div id="guide"></div>
+    <div id="ver"></div>
     <div id="overlay">
       <div id="banner" class="scanning">Point at the document…</div>
       <div id="detail"></div>
@@ -85,9 +91,11 @@
     <select id="cameraSelect" title="Camera"></select>
     <label class="iconbtn" for="fileInput" title="Upload image">📁</label>
     <button id="restartBtn" title="Back to camera">↻</button>
+    <button id="dbgBtn" title="Show/hide log">🐞</button>
     <input id="fileInput" type="file" accept="image/*" hidden>
   </div>
   <div id="status">Tap “Start camera”.</div>
+  <pre id="debug"></pre>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
@@ -105,6 +113,18 @@ const startBtn     = document.getElementById('startBtn');
 const restartBtn   = document.getElementById('restartBtn');
 const fileInput    = document.getElementById('fileInput');
 const photo        = document.getElementById('photo');
+const debugEl      = document.getElementById('debug');
+const dbgBtn       = document.getElementById('dbgBtn');
+
+const VERSION = 'build 2026-06-16 · v6 (on-screen MRZ debug)';
+function dbg(msg) {
+  debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
+  debugEl.scrollTop = debugEl.scrollHeight;
+  try { console.log(msg); } catch (e) {}
+}
+function dbgClear() { debugEl.textContent = ''; }
+document.getElementById('ver').textContent = VERSION;
+debugEl.textContent = VERSION + ' — log ready. Upload an image to see what the OCR reads.';
 
 let codeReader  = null;   // ZXing
 let ocrWorker   = null;   // Tesseract
@@ -238,9 +258,11 @@ let nativeDetector = null;
   try {
     if ('BarcodeDetector' in window) {
       const formats = await window.BarcodeDetector.getSupportedFormats();
-      if (formats.includes('pdf417')) nativeDetector = new window.BarcodeDetector({ formats: ['pdf417'] });
-    }
-  } catch (e) { nativeDetector = null; }
+      dbg('BarcodeDetector formats: ' + (formats.join(', ') || '(none)'));
+      if (formats.includes('pdf417')) { nativeDetector = new window.BarcodeDetector({ formats: ['pdf417'] }); dbg('Native PDF417: ON'); }
+      else dbg('Native PDF417: not supported → ZXing only');
+    } else dbg('BarcodeDetector: unavailable → ZXing only');
+  } catch (e) { nativeDetector = null; dbg('BarcodeDetector error: ' + (e.message || e)); }
 })();
 
 async function startScanner(deviceId) {
@@ -398,14 +420,15 @@ function ensureOCR() {                  // initialize the engine only once
 
 // MRZ detection for an uploaded image: OCR at higher resolution, full frame then bottom crop.
 async function detectMRZ(source, sw, sh) {
-  await ensureOCR();
+  try { await ensureOCR(); } catch (e) { dbg('OCR init FAILED: ' + (e.message || e)); return false; }
+  if (!ocrWorker) { dbg('OCR worker not ready'); return false; }
   const targetW = Math.min(1700, Math.round(sw * 1.5));
   for (const region of ['full', 'bottom']) {
     try {
       const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, region));
-      console.log('[MRZ OCR · ' + region + ']\n' + data.text);   // helps tuning if it ever misses
+      dbg('[MRZ OCR · ' + region + ']\n' + (data.text || '(empty)').trim());
       if (looksLikeMRZ(data.text)) return true;
-    } catch (e) { /* ignore */ }
+    } catch (e) { dbg('OCR error (' + region + '): ' + (e.message || e)); }
   }
   return false;
 }
@@ -482,24 +505,32 @@ async function processImage(file) {
     document.getElementById('guide').style.display = 'none';
     const W = img.naturalWidth, H = img.naturalHeight;
     const done = () => { statusEl.textContent = 'Image analyzed · tap ↻ to go back to the camera.'; };
+    dbgClear(); dbg('Image ' + W + '×' + H + ' — analyzing…');
     setResult('scanning', 'Analyzing…', '');
 
     // 1) Barcode decode (native → ZXing → preprocessed variants)
     statusEl.textContent = 'Looking for a barcode…';
     const text = await decodeBarcode(img, W, H);
-    if (text) { handleBarcode(text); done(); return; }
+    if (text) {
+      dbg('Barcode DECODED: ' + text.replace(/[\r\n]+/g, ' ').slice(0, 60) + '…');
+      handleBarcode(text); done(); return;
+    }
+    dbg('No barcode decoded.');
 
     // 2) MRZ
     statusEl.textContent = 'Looking for MRZ…';
-    if (await detectMRZ(img, W, H)) { setResult('mrz', 'MRZ', 'Machine-readable zone detected'); done(); return; }
+    if (await detectMRZ(img, W, H)) { dbg('→ Result: MRZ'); setResult('mrz', 'MRZ', 'Machine-readable zone detected'); done(); return; }
+    dbg('→ MRZ pattern not matched.');
 
     // 3) A barcode is clearly present but couldn't be decoded, and there's no MRZ → likely Colombia
     if (detectBarcodeBand(img, W, H)) {
+      dbg('→ Result: barcode band present (Colombia?)');
       setResult('colombia', 'BARCODE · Colombia?',
                 'PDF417 detected but not decoded — likely a Colombian ID card');
       done(); return;
     }
 
+    dbg('→ Result: Not detected');
     setResult('notfound', 'Not detected', 'No barcode or MRZ found in the image');
     done();
   };
@@ -528,6 +559,9 @@ fileInput.addEventListener('change', (e) => {
   const file = e.target.files && e.target.files[0];
   if (file) processImage(file);
   e.target.value = '';   // allow re-uploading the same file
+});
+dbgBtn.addEventListener('click', () => {
+  debugEl.style.display = (debugEl.style.display === 'none') ? '' : 'none';
 });
 </script>
 </body>
