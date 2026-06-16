@@ -130,7 +130,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v14 (isolate+binarize MRZ strip)';
+const VERSION = 'build 2026-06-16 · v15 (detect MRZ by < chevrons)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm: ready (strong PDF417 decoder)'));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -220,12 +220,12 @@ function handleBarcode(text) {
 // Recognizes the "shape" of an MRZ without needing to read it perfectly:
 // 2-3 long, monospaced lines, almost only [A-Z0-9<], with '<<' filler.
 function looksLikeMRZ(text) {
-  // Keep only MRZ characters per line (drop spaces / stray OCR punctuation). MRZ = 2-3 lines of
-  // length ~30/36/44 with long filler runs. We tolerate the OCR misreading '<' as a letter by also
-  // accepting a long run of ANY repeated character as a filler run.
-  const lines = text.split('\n')
-    .map(l => l.toUpperCase().replace(/[^A-Z0-9<]/g, ''))
-    .filter(l => l.length >= 20);
+  const upper = (text || '').toUpperCase();
+  // Strongest signal: the '<' chevron filler is essentially unique to MRZ — normal document text
+  // never produces it. A handful of them (even amid garbled OCR) reliably means MRZ.
+  if ((upper.match(/</g) || []).length >= 5) return true;
+  // Structural signal: ≥2 MRZ-length lines (30/36/44) with filler runs.
+  const lines = upper.split('\n').map(l => l.replace(/[^A-Z0-9<]/g, '')).filter(l => l.length >= 20);
   let mrzLines = 0, hasRun = false;
   for (const line of lines) {
     if (line.length < 26 || line.length > 46) continue;
@@ -234,7 +234,6 @@ function looksLikeMRZ(text) {
     if (run || (line.match(/</g) || []).length >= 1) { mrzLines++; if (run) hasRun = true; }
   }
   if (mrzLines >= 2 && hasRun) return true;
-  // Fallback for poor line segmentation: the whole text has multiple long '<' filler runs.
   const joined = lines.join('');
   return (joined.match(/<{3,}/g) || []).length >= 2 && joined.length >= 50;
 }
@@ -509,13 +508,16 @@ async function detectMRZ(source, sw, sh) {
   const targetW = Math.min(2400, Math.round(sw * 2));   // keep the small MRZ text legible
   // The MRZ sits in the bottom strip — isolate it (tight crops) so it's large and not mixed with
   // the rest of the document. Binarized so the MRZ model gets clean text.
-  for (const cropTop of [0.74, 0.55, 0]) {
+  let allText = '';
+  for (const cropTop of [0, 0.55, 0.74]) {
     try {
       const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, cropTop, true));
       dbg('[MRZ OCR · top=' + cropTop + ']\n' + (data.text || '(empty)').trim());
+      allText += '\n' + (data.text || '');
       if (looksLikeMRZ(data.text)) return true;
     } catch (e) { dbg('OCR error (top=' + cropTop + '): ' + (e.message || e)); }
   }
+  if (looksLikeMRZ(allText)) { dbg('MRZ matched on combined OCR text'); return true; }
   return false;
 }
 
