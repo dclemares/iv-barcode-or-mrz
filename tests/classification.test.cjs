@@ -87,6 +87,23 @@ test('MRZ matcher tolerates phone-photo OCR: length drift + dropped chevron fill
   assert.equal(looksLikeMRZ('noise <<<<< noise'), false);
 });
 
+test('undecodable PDF417 OCR noise (scattered chevrons) is NOT taken for an MRZ', () => {
+  const { looksLikeMRZ } = loadClassifier();
+  // Reproduces a Colombian cédula barcode OCR'd as garbage: several long lines but chevrons only
+  // sprinkled (<=2 per line, no concentrated filler cluster). Must stay false so it falls through
+  // to the Colombian-barcode path instead of being misread as an MRZ.
+  const barcodeNoise = [
+    'A'.repeat(34) + '<',        // 35 ch, 1 chevron
+    'A'.repeat(52),              // 52 ch, 0
+    'A'.repeat(30),              // 30 ch, 0
+    'A'.repeat(32),              // 32 ch, 0
+    'A'.repeat(45) + '<<',       // 47 ch, 2 chevrons (family 44)
+    'A'.repeat(34),              // 34 ch, 0
+    'A'.repeat(44) + '<<'        // 46 ch, 2 chevrons (family 44)
+  ].join('\n');
+  assert.equal(looksLikeMRZ(barcodeNoise), false);
+});
+
 test('barcode band detector has relaxed fallback passes for low-contrast PDF417', () => {
   assert.match(html, /BARCODE_BAND_PASSES/);
   assert.match(html, /delta:\s*18/);

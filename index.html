@@ -133,7 +133,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v27 (tolerant MRZ for phone-photo OCR)';
+const VERSION = 'build 2026-06-16 · v28 (MRZ vs barcode: concentrated chevrons)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm ready: ' + (window.__zxingReadBarcodes ? 'OK — strong PDF417 decoder active' : 'FUNCTION MISSING')));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -265,18 +265,14 @@ function looksLikeMRZ(text) {
     const chevrons = (joined.match(/</g) || []).length;
     if (chevrons >= 5 && /<{2,}/.test(joined)) return true;
   }
-  // Tolerant pass: phone-photo OCR drifts MRZ line lengths and drops chevron filler. Accept TWO
-  // long MRZ-charset lines (28-52 chars) whose combined '<' count is clearly MRZ-like — a '<<'
-  // filler run plus a few chevrons, or simply many chevrons. Normal text / barcodes have no '<'.
-  const longLines = cleanedLines.filter(l => l.length >= 28 && l.length <= 52);
-  if (longLines.length >= 2) {
-    const joined = longLines.join('');
-    const chevrons = (joined.match(/</g) || []).length;
-    if ((/<{2,}/.test(joined) && chevrons >= 4) || chevrons >= 6) return true;
-  }
+  // Tolerant pass: phone-photo OCR drifts MRZ line lengths and drops most of the chevron filler,
+  // but a genuine MRZ name line still keeps a CONCENTRATED chevron cluster on ONE line (>=4 '<'
+  // including a '<<' run). Undecodable-barcode OCR noise only sprinkles isolated chevrons (<=2 per
+  // line, never a cluster), so requiring the cluster on a single line tells a degraded MRZ apart
+  // from an undecodable barcode (e.g. a low-res Colombian cédula PDF417).
   for (const line of cleanedLines) {
     const chevrons = (line.match(/</g) || []).length;
-    if (line.length >= 16 && chevrons >= 5 && /<{2,}/.test(line) && /[A-Z0-9]{3}/.test(line)) {
+    if (line.length >= 16 && chevrons >= 4 && /<{2,}/.test(line) && /[A-Z0-9]{3}/.test(line)) {
       return true;
     }
   }
