@@ -100,6 +100,20 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script type="module">
+  // zxing-wasm: the ZXing C++ engine compiled to WebAssembly — decodes PDF417 far more reliably
+  // than pure-JS @zxing/library, so AAMVA (US/Canada) and Colombian barcodes get read correctly.
+  try {
+    const m = await import('https://cdn.jsdelivr.net/npm/zxing-wasm@1.3.5/dist/es/reader/index.js');
+    m.setZXingModuleOverrides({
+      locateFile: (path, prefix) => path.endsWith('.wasm')
+        ? 'https://cdn.jsdelivr.net/npm/zxing-wasm@1.3.5/dist/reader/zxing_reader.wasm'
+        : prefix + path
+    });
+    window.__zxingReadBarcodes = m.readBarcodes;
+    window.dispatchEvent(new Event('zxingwasm-ready'));
+  } catch (e) { console.log('zxing-wasm load failed', e); }
+</script>
 <script>
 "use strict";
 
@@ -116,7 +130,8 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v9 (edge-based band detect)';
+const VERSION = 'build 2026-06-16 · v10 (zxing-wasm decoder)';
+window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm: ready (strong PDF417 decoder)'));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
   debugEl.scrollTop = debugEl.scrollHeight;
@@ -273,69 +288,81 @@ async function startScanner(deviceId) {
   });
 }
 
-// Live: also poll the native detector — it catches PDF417 that ZXing's continuous scan misses.
-async function nativeTick() {
-  if (mode !== 'live' || !nativeDetector || !video.videoWidth) return;
+// Live: besides ZXing's continuous scan, poll the stronger decoders (wasm + native) on the
+// current frame — they catch PDF417 (incl. AAMVA) that pure-JS ZXing misses live.
+let liveBusy = false;
+async function liveTick() {
+  if (mode !== 'live' || liveBusy || !video.videoWidth) return;
   if (performance.now() - lastBarcodeAt < 1200) return;
+  liveBusy = true;
   try {
-    const codes = await nativeDetector.detect(video);
-    if (codes && codes.length) handleBarcode(codes[0].rawValue);
+    const canvas = toCanvas(video, video.videoWidth, video.videoHeight, Math.min(1280, video.videoWidth));
+    let t = await wasmDecode(canvas);
+    if (!t) t = await nativeDecode(video);
+    if (t) handleBarcode(t);
   } catch (e) { /* ignore */ }
+  liveBusy = false;
 }
-setInterval(nativeTick, 400);
+setInterval(liveTick, 500);
 
-// Build a preprocessed canvas (grayscale + contrast or binarization), optionally upscaled,
-// to give ZXing a better shot at a low-contrast / dense scan.
-function preprocess(source, sw, sh, targetW, variant) {
-  const w = Math.min(targetW, Math.round(sw * 1.5));
+// Render a source (image/video) to a canvas at targetW (allow up to 2× upscale).
+function toCanvas(source, sw, sh, targetW) {
+  const w = Math.min(targetW, Math.round(sw * 2));
   const scale = w / sw;
   const h = Math.round(sh * scale);
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
-  const ctx = c.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(source, 0, 0, sw, sh, 0, 0, w, h);
-  const id = ctx.getImageData(0, 0, w, h);
-  const d = id.data;
-  let sum = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    const g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-    d[i] = d[i + 1] = d[i + 2] = g; sum += g;
-  }
-  const mean = sum / (w * h);
-  for (let i = 0; i < d.length; i += 4) {
-    let v;
-    if (variant === 'binary') v = d[i] < mean ? 0 : 255;
-    else { v = (d[i] - mean) * 1.6 + mean; v = v < 0 ? 0 : v > 255 ? 255 : v; }
-    d[i] = d[i + 1] = d[i + 2] = v;
-  }
-  ctx.putImageData(id, 0, 0);
+  c.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, 0, sw, sh, 0, 0, w, h);
   return c;
 }
 
-// Decode a PDF417 from an image: native first, then ZXing, then ZXing on preprocessed variants.
-// Returns the decoded string, or null if nothing could be decoded.
-async function decodeBarcode(source, sw, sh) {
-  if (nativeDetector) {
-    try {
-      const codes = await nativeDetector.detect(source);
-      if (codes && codes.length) return codes[0].rawValue;
-    } catch (e) {}
-  }
-  const reader = new ZXing.BrowserMultiFormatReader(hints);
+function binarizeCanvas(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = id.data; let s = 0;
+  for (let i = 0; i < d.length; i += 4) { const g = d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114; d[i]=d[i+1]=d[i+2]=g; s+=g; }
+  const m = s / (canvas.width * canvas.height);
+  for (let i = 0; i < d.length; i += 4) { const v = d[i] < m ? 0 : 255; d[i]=d[i+1]=d[i+2]=v; }
+  ctx.putImageData(id, 0, 0);
+  return canvas;
+}
+
+async function wasmDecode(canvas) {
+  if (!window.__zxingReadBarcodes) return null;
   try {
-    const r = await reader.decodeFromImageElement(source);
-    if (r) return r.getText();
-  } catch (e) {}
-  for (const variant of ['contrast', 'binary']) {
-    for (const w of [Math.min(1600, sw), 1000]) {
-      try {
-        const canvas = preprocess(source, sw, sh, w, variant);
-        const r = await reader.decodeFromImageUrl(canvas.toDataURL());
-        if (r) return r.getText();
-      } catch (e) {}
-    }
-  }
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const res = await window.__zxingReadBarcodes(imgData, { formats: ['PDF417'], tryHarder: true, maxNumberOfSymbols: 1 });
+    if (res && res.length && res[0].text) return res[0].text;
+  } catch (e) { dbg('wasm error: ' + (e.message || e)); }
   return null;
+}
+
+async function nativeDecode(source) {
+  if (!nativeDetector) return null;
+  try { const codes = await nativeDetector.detect(source); if (codes && codes.length) return codes[0].rawValue; } catch (e) {}
+  return null;
+}
+
+async function zxingDecodeCanvas(canvas) {
+  try { const r = await new ZXing.BrowserMultiFormatReader(hints).decodeFromImageUrl(canvas.toDataURL()); if (r) return r.getText(); } catch (e) {}
+  return null;
+}
+
+// Decode a PDF417 from a canvas: wasm → native → ZXing, then a binarized retry. Returns text|null.
+async function decodeFromCanvas(canvas) {
+  let t = await wasmDecode(canvas);     if (t) return t;
+  t = await nativeDecode(canvas);       if (t) return t;
+  t = await zxingDecodeCanvas(canvas);  if (t) return t;
+  binarizeCanvas(canvas);
+  t = await wasmDecode(canvas);         if (t) return t;
+  t = await zxingDecodeCanvas(canvas);  if (t) return t;
+  return null;
+}
+
+// Decode a barcode from an image element (renders to a high-res canvas first).
+async function decodeBarcode(source, sw, sh) {
+  return decodeFromCanvas(toCanvas(source, sw, sh, Math.min(2000, sw)));
 }
 
 // Locate the densest contiguous band of high black/white-transition rows (the signature of a
@@ -390,26 +417,8 @@ function cropCanvas(source, sw, sh, y0, y1, targetW) {
   return c;
 }
 
-// Decode a PDF417 from a canvas: native detector first, then ZXing (+ binarized variant).
-async function decodeCanvas(canvas) {
-  if (nativeDetector) {
-    try { const codes = await nativeDetector.detect(canvas); if (codes && codes.length) return codes[0].rawValue; } catch (e) {}
-  }
-  const reader = new ZXing.BrowserMultiFormatReader(hints);
-  try { const r = await reader.decodeFromImageUrl(canvas.toDataURL()); if (r) return r.getText(); } catch (e) {}
-  // binarized retry
-  try {
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = id.data; let s = 0;
-    for (let i = 0; i < d.length; i += 4) { const g = d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114; d[i]=d[i+1]=d[i+2]=g; s+=g; }
-    const m = s / (canvas.width * canvas.height);
-    for (let i = 0; i < d.length; i += 4) { const v = d[i] < m ? 0 : 255; d[i]=d[i+1]=d[i+2]=v; }
-    ctx.putImageData(id, 0, 0);
-    const r = await reader.decodeFromImageUrl(canvas.toDataURL()); if (r) return r.getText();
-  } catch (e) {}
-  return null;
-}
+// Decode a PDF417 from a (cropped) canvas — uses the unified wasm → native → ZXing pipeline.
+async function decodeCanvas(canvas) { return decodeFromCanvas(canvas); }
 
 /* ───────────────────── MRZ (Tesseract OCR) ───────────────────── */
 
@@ -575,8 +584,10 @@ async function processImage(file) {
 
     // 4) A barcode is clearly present but couldn't be decoded, and there's no MRZ → likely Colombia
     if (band) {
-      dbg('→ Result: barcode present (shape), undecoded → Colombia');
-      setResult('colombia', 'BARCODE · Colombia', 'Detected by barcode shape (content not decoded)');
+      // We can't tell AAMVA (US/Canada) from Colombia without reading the content, so we DON'T guess.
+      dbg('→ Result: barcode present but unreadable (type unknown)');
+      setResult('aamva', 'BARCODE (unreadable)',
+                'A barcode is present but its content could not be read — move closer / better light');
       done(); return;
     }
 
