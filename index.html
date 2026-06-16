@@ -116,7 +116,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v8 (locate+crop barcode)';
+const VERSION = 'build 2026-06-16 · v9 (edge-based band detect)';
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
   debugEl.scrollTop = debugEl.scrollHeight;
@@ -350,22 +350,25 @@ function findBarcodeBand(source, sw, sh) {
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(source, 0, 0, sw, sh, 0, 0, W, H);
   const d = ctx.getImageData(0, 0, W, H).data;
-  const gray = new Uint8Array(W * H);
-  let sum = 0;
-  for (let p = 0, q = 0; p < d.length; p += 4, q++) {
-    const g = (d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114) | 0;
-    gray[q] = g; sum += g;
-  }
-  const thresh = sum / (W * H);
-  const minTr = W * 0.11;
+  // Count STRONG intensity edges per row (illumination-independent — no global threshold, which
+  // failed on the cédula's bright background). A barcode row has many sharp black/white edges
+  // spread across the FULL width — unlike a fingerprint (corner blob) or a single text line.
+  const DELTA = 38;
+  const minEdges = W * 0.11;
+  const minSide = W * 0.03;
+  const midL = W * 0.45, midR = W * 0.55;
   let run = 0, bestRun = 0, bestEnd = -1;
   for (let y = 0; y < H; y++) {
-    let tr = 0, prev = gray[y * W] < thresh ? 0 : 1;
-    for (let x = 1; x < W; x++) {
-      const cur = gray[y * W + x] < thresh ? 0 : 1;
-      if (cur !== prev) { tr++; prev = cur; }
+    let edges = 0, eL = 0, eR = 0, prev = -1;
+    const base = y * W * 4;
+    for (let x = 0; x < W; x++) {
+      const i = base + x * 4;
+      const g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+      if (prev >= 0 && Math.abs(g - prev) > DELTA) { edges++; if (x < midL) eL++; else if (x > midR) eR++; }
+      prev = g;
     }
-    if (tr >= minTr) { run++; if (run > bestRun) { bestRun = run; bestEnd = y; } }
+    const dense = edges >= minEdges && eL >= minSide && eR >= minSide;
+    if (dense) { run++; if (run > bestRun) { bestRun = run; bestEnd = y; } }
     else run = 0;
   }
   if (bestRun < Math.max(12, H * 0.025)) return null;
@@ -572,8 +575,8 @@ async function processImage(file) {
 
     // 4) A barcode is clearly present but couldn't be decoded, and there's no MRZ → likely Colombia
     if (band) {
-      dbg('→ Result: barcode present but undecoded (Colombia?)');
-      setResult('colombia', 'BARCODE · Colombia?', 'PDF417 detected but not decoded — likely a Colombian ID card');
+      dbg('→ Result: barcode present (shape), undecoded → Colombia');
+      setResult('colombia', 'BARCODE · Colombia', 'Detected by barcode shape (content not decoded)');
       done(); return;
     }
 
