@@ -1,53 +1,51 @@
-# Detector Barcode vs MRZ — Diseño
+# Barcode vs MRZ Detector — Design
 
-Fecha: 2026-06-16
+Date: 2026-06-16
 
-## Objetivo
+## Objective
 
-Página web que, en tiempo real con la cámara (sin sacar foto) y en menos de ~1 s, clasifique lo
-que se le muestra en uno de tres tipos:
+A web page that, in real time with the camera (without taking a photo) and in under ~1 s,
+classifies what it's shown into one of these types:
 
-- **MRZ** — zona de lectura mecánica (pasaporte, ID, visado).
-- **BARCODE · EE.UU./Canadá** — licencia de conducir AAMVA (PDF417).
-- **BARCODE · Colombia** — cédula colombiana (PDF417 propietario).
+- **MRZ** — machine-readable zone (passport, ID, visa).
+- **BARCODE · USA** — AAMVA driver's license from a US state (PDF417).
+- **BARCODE · Canada** — AAMVA driver's license from a Canadian province (PDF417).
+- **BARCODE · Colombia** — Colombian ID card (proprietary PDF417).
 
-EE.UU./Canadá y Colombia se agrupan como dos *tipos de barcode* distintos porque, aunque ambos
-son PDF417 y parecen iguales, se leen de forma diferente.
+## Decisions (brainstorming)
 
-## Decisiones (brainstorming)
+- Delivery: **a single `index.html`** (no build, fully client-side).
+- Device: **mobile and laptop**, with a camera selector.
+- Output: **type only** (document data is not extracted).
 
-- Entrega: **un solo `index.html`** (sin build, todo cliente).
-- Dispositivo: **móvil y portátil**, con selector de cámara.
-- Salida: **solo el tipo** (no se extraen los datos del documento).
+## Classification logic
 
-## Lógica de clasificación
+Two detectors run in parallel over the live video:
 
-Dos detectores corren en paralelo sobre el vídeo en vivo:
+1. **Barcode (PDF417) with ZXing** — fast. On decode:
+   - Content with an AAMVA header (`@` start and/or `"ANSI "` + IIN) → license. **USA vs Canada** is
+     separated by mapping the IIN (6 digits after `ANSI `) to its jurisdiction via the embedded AAMVA
+     registry; the state/province is shown. Unregistered IIN → generic `USA/Canada` (the country is
+     not guessed).
+   - A PDF417 that decodes but is **not** AAMVA → **Colombia (ID card)**.
+2. **MRZ with lightweight OCR (Tesseract.js)** — over the downscaled, grayscale frame. It doesn't
+   read the full text; it recognizes the *shape*: ≥2 lines of 24–48 characters made up almost only
+   of `[A-Z0-9<]` and with at least one `<<` filler.
 
-1. **Barcode (PDF417) con ZXing** — rápido. Al decodificar:
-   - Contenido con cabecera AAMVA (`@` inicial y/o `"ANSI "` + IIN) → licencia. Se separa
-     **EE.UU. vs Canadá** mapeando el IIN (6 dígitos tras `ANSI `) a su jurisdicción mediante el
-     registro AAMVA embebido; se muestra estado/provincia. IIN no registrado → genérico
-     `EE.UU./Canadá` (no se adivina el país).
-   - PDF417 que decodifica pero **no** es AAMVA → **Colombia (cédula)**.
-2. **MRZ con OCR ligero (Tesseract.js)** — sobre el fotograma reducido a escala de grises.
-   No lee el texto completo; reconoce la *forma*: ≥2 líneas de 24–48 caracteres compuestas casi
-   solo por `[A-Z0-9<]` y con al menos un relleno `<<`.
-
-Arbitraje: el barcode tiene prioridad; el OCR se omite mientras hay un barcode reciente.
-El resultado se mantiene 1,5 s antes de volver a "buscando".
+Arbitration: the barcode takes priority; OCR is skipped while a recent barcode exists. The result
+stays for 1.5 s before reverting to "scanning".
 
 ## Stack
 
-HTML/JS puro. `@zxing/library@0.21.3` y `tesseract.js@5.1.1` por CDN (jsDelivr). Sin servidor propio.
+Plain HTML/JS. `@zxing/library@0.21.3` and `tesseract.js@5.1.1` via CDN (jsDelivr). No own server.
 
-## Restricciones
+## Constraints
 
-- La cámara exige contexto seguro (https o `localhost`); `file://` no sirve. Se documenta el
-  arranque con `python3 -m http.server`.
-- Permiso de cámara tras gesto del usuario (botón «Iniciar cámara») por compatibilidad con iOS.
+- The camera requires a secure context (https or `localhost`); `file://` won't work. Startup with
+  `python3 -m http.server` is documented.
+- Camera permission after a user gesture (a "Start camera" button) for iOS compatibility.
 
-## Fuera de alcance
+## Out of scope
 
-- Extracción/validación de los datos del documento.
-- Firma positiva del formato de la Registraduría (mejora futura si entran más barcodes).
+- Extracting/validating the document data.
+- A positive signature for the Registraduría format (future improvement if more barcodes are added).

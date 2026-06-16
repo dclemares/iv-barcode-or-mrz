@@ -1,57 +1,62 @@
-# ¿Barcode o MRZ?
+# Barcode or MRZ?
 
-Página que identifica **en tiempo real con la cámara (sin sacar foto)** si lo que se muestra es:
+A page that identifies **in real time with the camera (without taking a photo)** whether what you
+show it is:
 
-- **MRZ** — zona de lectura mecánica (pasaportes, DNI/ID, visados).
-- **BARCODE · EE.UU.** — licencia de conducir AAMVA de un estado de EE.UU. (PDF417).
-- **BARCODE · Canadá** — licencia de conducir AAMVA de una provincia canadiense (PDF417).
-- **BARCODE · Colombia** — cédula colombiana (PDF417 propietario).
+- **MRZ** — machine-readable zone (passports, ID cards, visas).
+- **BARCODE · USA** — AAMVA driver's license from a US state (PDF417).
+- **BARCODE · Canada** — AAMVA driver's license from a Canadian province (PDF417).
+- **BARCODE · Colombia** — Colombian ID card (proprietary PDF417).
 
-Las licencias AAMVA y la cédula usan ambas PDF417, así que parecen iguales: se distinguen por el
-**contenido** del código (las licencias llevan la cabecera AAMVA `@…ANSI …`; la cédula no).
-Dentro de AAMVA, **EE.UU. y Canadá se separan por el IIN** (los 6 dígitos tras `ANSI `), que
-identifica la jurisdicción emisora; también se muestra el estado/provincia. Si el IIN no está en
-el registro AAMVA (p. ej. Territorios del Noroeste, sin IIN registrado) se etiqueta como genérico
-`EE.UU./Canadá` en lugar de adivinar el país.
+AAMVA licenses and the Colombian ID card both use PDF417, so they look the same: they're told apart
+by the **content** of the code (licenses carry the AAMVA header `@…ANSI …`; the ID card doesn't).
+Within AAMVA, **USA and Canada are separated by the IIN** (the 6 digits after `ANSI `), which
+identifies the issuing jurisdiction; the state/province is also shown. If the IIN isn't in the AAMVA
+registry (e.g. Northwest Territories, which has no registered IIN) it's labeled generically as
+`USA/Canada` instead of guessing the country.
 
-## Cómo ejecutarlo
+## How to run it
 
-Los navegadores solo dan acceso a la cámara en **contexto seguro** (https o `localhost`).
-Abrir el archivo con doble clic (`file://`) **no** activa la cámara. Sírvelo en local:
+Browsers only grant camera access in a **secure context** (https or `localhost`). Opening the file
+by double-clicking (`file://`) will **not** enable the camera. Serve it locally:
 
 ```bash
 cd "IV BARCODE OR MRZ"
 python3 -m http.server 8000
 ```
 
-Luego abre **http://localhost:8000** en el navegador.
+Then open **http://localhost:8000** in your browser.
 
-### Probarlo desde el móvil
+### Testing it on your phone
 
-1. PC y móvil en la misma red Wi-Fi.
-2. Averigua la IP de tu PC (p. ej. `192.168.1.50`).
-3. iOS/Safari exige **https** para la cámara en IP de red. La forma más simple es publicar la
-   página (GitHub Pages, Netlify, Vercel…) o usar un túnel https (p. ej. `ngrok http 8000`) y
-   abrir la URL `https://…` que te dé.
+1. PC and phone on the same Wi-Fi network.
+2. Find your PC's IP (e.g. `192.168.1.50`).
+3. iOS/Safari requires **https** for the camera over a network IP. The simplest options are to
+   publish the page (GitHub Pages, Netlify, Vercel…) or use an https tunnel (e.g. `ngrok http 8000`)
+   and open the `https://…` URL it gives you.
 
-Pulsa **«Iniciar cámara»**, acepta el permiso y apunta al documento dentro del recuadro.
+It's also already deployed via GitHub Pages: **https://dclemares.github.io/iv-barcode-or-mrz/**
 
-## Cómo funciona (rápido)
+Tap **"Start camera"**, accept the permission, and point at the document inside the frame.
 
-- **Barcode (instantáneo):** [ZXing](https://github.com/zxing-js/library) decodifica el PDF417 en
-  vivo. Si el contenido lleva la cabecera AAMVA → EE.UU./Canadá; si decodifica pero no es AAMVA →
-  Colombia.
-- **MRZ:** OCR ligero ([Tesseract.js](https://tesseract.projectnaptha.com/)) sobre el fotograma
-  reducido; no lee el texto completo, solo reconoce la **forma** del MRZ (líneas de 30/36/44
-  caracteres con relleno `<<`). El motor se precalienta al abrir para que la primera detección sea
-  rápida.
-- El barcode tiene prioridad sobre el OCR para no malgastar trabajo.
+## How it works (quick)
 
-## Limitaciones conocidas
+- **Barcode (instant):** [ZXing](https://github.com/zxing-js/library) decodes the PDF417 live. If
+  the content carries the AAMVA header → USA/Canada (separated by IIN); if it decodes but isn't
+  AAMVA → Colombia.
+- **MRZ:** lightweight OCR ([Tesseract.js](https://tesseract.projectnaptha.com/)) over the
+  downscaled frame; it doesn't read the full text, only recognizes the **shape** of the MRZ (lines
+  of 30/36/44 characters with `<<` filler). The engine is warmed up on load so the first detection
+  is fast.
+- The barcode takes priority over OCR to avoid wasted work.
 
-- La rama **barcode** es muy por debajo de 1 s. La rama **MRZ** depende del OCR: suele detectar en
-  ~0,5–1 s tras el calentamiento, algo más lento en móviles modestos.
-- La distinción Colombia se basa en «PDF417 que no es AAMVA», válida para los tres documentos
-  contemplados. Si más adelante hay que admitir otros barcodes, conviene añadir una firma positiva
-  del formato de la Registraduría.
-- Requiere conexión la primera vez (carga ZXing y Tesseract por CDN).
+## Known limitations
+
+- The **barcode** path is well under 1 s. The **MRZ** path depends on OCR: it usually detects in
+  ~0.5–1 s after warm-up, somewhat slower on modest phones.
+- The Colombia distinction is based on "PDF417 that is not AAMVA", valid for the three documents in
+  scope. If other barcodes need to be supported later, it's worth adding a positive signature for
+  the Registraduría format.
+- Northwest Territories has no registered AAMVA IIN in the sources used, so such a document would
+  fall under the generic `USA/Canada` label.
+- Requires a connection the first time (loads ZXing and Tesseract from a CDN).

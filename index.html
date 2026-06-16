@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>¿Barcode o MRZ?</title>
+<title>Barcode or MRZ?</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -15,11 +15,11 @@
   #photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
     background: #000; display: none; }
 
-  /* Guía de encuadre */
+  /* Framing guide */
   #guide { position: absolute; left: 8%; right: 8%; top: 28%; bottom: 28%;
     border: 2px dashed rgba(255,255,255,.35); border-radius: 14px; pointer-events: none; }
 
-  /* Banner de resultado */
+  /* Result banner */
   #overlay { position: absolute; left: 0; right: 0; top: 0; padding: 16px;
     display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
   #banner { min-width: 60%; max-width: 92%; text-align: center; padding: 18px 22px;
@@ -34,11 +34,11 @@
   .usa      { background: #16a34a; }
   .canada   { background: #d52b1e; }
   .mexico   { background: #0d9488; }
-  .aamva    { background: #475569; }  /* AAMVA, jurisdicción no reconocida */
+  .aamva    { background: #475569; }  /* AAMVA, unrecognized jurisdiction */
   .colombia { background: #f59e0b; color: #1f2937; }
   .error    { background: #7f1d1d; }
 
-  /* Controles */
+  /* Controls */
   #controls { display: flex; gap: 10px; align-items: center; padding: 10px 12px;
     background: #0b0f14; border-top: 1px solid #1f2933; }
   #cameraSelect { flex: 1; min-width: 0; padding: 10px; border-radius: 10px;
@@ -55,7 +55,7 @@
   #status { padding: 8px 12px; font-size: 13px; color: #9ca3af; background: #0b0f14;
     border-top: 1px solid #1f2933; text-align: center; min-height: 1.2em; }
 
-  /* Pantalla de inicio */
+  /* Start screen */
   #start { position: absolute; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 18px; background: #0b0f14; z-index: 5; }
   #start h1 { font-size: clamp(20px, 5vw, 28px); margin: 0; }
@@ -70,24 +70,24 @@
     <img id="photo" alt="">
     <div id="guide"></div>
     <div id="overlay">
-      <div id="banner" class="scanning">Apunta al documento…</div>
+      <div id="banner" class="scanning">Point at the document…</div>
       <div id="detail"></div>
     </div>
     <div id="start">
-      <h1>¿Barcode o MRZ?</h1>
-      <p>Identifica en tiempo real si lo que muestras a la cámara es un <b>MRZ</b>,
-         un <b>barcode de licencia EE.UU./Canadá</b> o un <b>barcode de cédula colombiana</b>.</p>
-      <button id="startBtn">▶ Iniciar cámara</button>
-      <label class="btnlike" for="fileInput">📁 Subir imagen</label>
+      <h1>Barcode or MRZ?</h1>
+      <p>Identifies in real time whether what you show the camera is an <b>MRZ</b>,
+         a <b>US/Canada driver-license barcode</b>, or a <b>Colombian ID-card barcode</b>.</p>
+      <button id="startBtn">▶ Start camera</button>
+      <label class="btnlike" for="fileInput">📁 Upload image</label>
     </div>
   </div>
   <div id="controls">
-    <select id="cameraSelect" title="Cámara"></select>
-    <label class="iconbtn" for="fileInput" title="Subir imagen">📁</label>
-    <button id="restartBtn" title="Volver a la cámara">↻</button>
+    <select id="cameraSelect" title="Camera"></select>
+    <label class="iconbtn" for="fileInput" title="Upload image">📁</label>
+    <button id="restartBtn" title="Back to camera">↻</button>
     <input id="fileInput" type="file" accept="image/*" hidden>
   </div>
-  <div id="status">Pulsa «Iniciar cámara».</div>
+  <div id="status">Tap “Start camera”.</div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
@@ -111,78 +111,78 @@ let ocrWorker   = null;   // Tesseract
 let ocrBusy     = false;
 let lastResultAt  = 0;
 let lastBarcodeAt = -99999;
-let mode = 'live';        // 'live' (cámara) | 'image' (imagen subida)
+let mode = 'live';        // 'live' (camera) | 'image' (uploaded image)
 let ocrInitPromise = null;
-const STICKY_MS = 1500;   // cuánto se mantiene el resultado antes de volver a "buscando"
+const STICKY_MS = 1500;   // how long a result stays before reverting to "scanning"
 
-/* ───────────────────── Clasificación ───────────────────── */
+/* ───────────────────── Classification ───────────────────── */
 
-// AAMVA (licencias de EE.UU. y Canadá): el PDF417 empieza con '@' y contiene "ANSI " + IIN.
-// La cédula colombiana usa un PDF417 binario propio (Registraduría) que NO lleva esa cabecera.
+// AAMVA (US and Canada licenses): the PDF417 starts with '@' and contains "ANSI " + IIN.
+// The Colombian ID card uses a proprietary binary PDF417 (Registraduría) without that header.
 function isAAMVA(text) {
   return text.indexOf('ANSI ') !== -1 || text.charCodeAt(0) === 64; // 64 = '@'
 }
 
-// IIN (Issuer Identification Number) → [país, jurisdicción]. Son los 6 dígitos tras "ANSI ".
-// Permite separar EE.UU. de Canadá. Fuente: registro AAMVA (c0shea/IdParser, py-aamva).
+// IIN (Issuer Identification Number) → [country, jurisdiction]. The 6 digits after "ANSI ".
+// Lets us tell USA apart from Canada. Source: AAMVA registry (c0shea/IdParser, py-aamva).
 const AAMVA_ISSUERS = {
-  // Canadá
+  // Canada
   '604432':['CA','Alberta'], '990876':['CA','Alberta'],
-  '636028':['CA','Columbia Británica'], '636048':['CA','Manitoba'],
-  '636017':['CA','Nuevo Brunswick'], '636016':['CA','Terranova y Labrador'],
-  '636013':['CA','Nueva Escocia'], '604433':['CA','Nunavut'], '636012':['CA','Ontario'],
-  '604426':['CA','Isla del Príncipe Eduardo'], '604428':['CA','Quebec'],
-  '636044':['CA','Saskatchewan'], '604429':['CA','Yukón'],
-  // México
+  '636028':['CA','British Columbia'], '636048':['CA','Manitoba'],
+  '636017':['CA','New Brunswick'], '636016':['CA','Newfoundland and Labrador'],
+  '636013':['CA','Nova Scotia'], '604433':['CA','Nunavut'], '636012':['CA','Ontario'],
+  '604426':['CA','Prince Edward Island'], '604428':['CA','Quebec'],
+  '636044':['CA','Saskatchewan'], '604429':['CA','Yukon'],
+  // Mexico
   '636056':['MX','Coahuila'], '636057':['MX','Hidalgo'],
-  // EE.UU. (estados y territorios)
+  // USA (states and territories)
   '636033':['US','Alabama'], '636059':['US','Alaska'], '636026':['US','Arizona'],
   '636021':['US','Arkansas'], '636014':['US','California'], '636020':['US','Colorado'],
-  '636006':['US','Connecticut'], '636011':['US','Delaware'], '636043':['US','Distrito de Columbia'],
+  '636006':['US','Connecticut'], '636011':['US','Delaware'], '636043':['US','District of Columbia'],
   '636010':['US','Florida'], '636055':['US','Georgia'], '636019':['US','Guam'],
-  '636047':['US','Hawái'], '636050':['US','Idaho'], '636035':['US','Illinois'],
+  '636047':['US','Hawaii'], '636050':['US','Idaho'], '636035':['US','Illinois'],
   '636037':['US','Indiana'], '636018':['US','Iowa'], '636022':['US','Kansas'],
-  '636046':['US','Kentucky'], '636007':['US','Luisiana'], '636041':['US','Maine'],
-  '636003':['US','Maryland'], '636002':['US','Massachusetts'], '636032':['US','Míchigan'],
-  '636038':['US','Minnesota'], '636051':['US','Misisipi'], '636030':['US','Misuri'],
+  '636046':['US','Kentucky'], '636007':['US','Louisiana'], '636041':['US','Maine'],
+  '636003':['US','Maryland'], '636002':['US','Massachusetts'], '636032':['US','Michigan'],
+  '636038':['US','Minnesota'], '636051':['US','Mississippi'], '636030':['US','Missouri'],
   '636008':['US','Montana'], '636054':['US','Nebraska'], '636049':['US','Nevada'],
-  '636039':['US','Nuevo Hampshire'], '636036':['US','Nueva Jersey'], '636009':['US','Nuevo México'],
-  '636001':['US','Nueva York'], '636004':['US','Carolina del Norte'], '636034':['US','Dakota del Norte'],
-  '636023':['US','Ohio'], '636058':['US','Oklahoma'], '636029':['US','Oregón'],
-  '636025':['US','Pensilvania'], '604431':['US','Puerto Rico'], '636052':['US','Rhode Island'],
-  '636005':['US','Carolina del Sur'], '636042':['US','Dakota del Sur'], '636053':['US','Tennessee'],
+  '636039':['US','New Hampshire'], '636036':['US','New Jersey'], '636009':['US','New Mexico'],
+  '636001':['US','New York'], '636004':['US','North Carolina'], '636034':['US','North Dakota'],
+  '636023':['US','Ohio'], '636058':['US','Oklahoma'], '636029':['US','Oregon'],
+  '636025':['US','Pennsylvania'], '604431':['US','Puerto Rico'], '636052':['US','Rhode Island'],
+  '636005':['US','South Carolina'], '636042':['US','South Dakota'], '636053':['US','Tennessee'],
   '636015':['US','Texas'], '636040':['US','Utah'], '636024':['US','Vermont'],
-  '636000':['US','Virginia'], '636045':['US','Washington'], '636061':['US','Virginia Occidental'],
+  '636000':['US','Virginia'], '636045':['US','Washington'], '636061':['US','West Virginia'],
   '636031':['US','Wisconsin'], '636060':['US','Wyoming'],
-  '636027':['US','Departamento de Estado de EE.UU.'], '636062':['US','Islas Vírgenes de EE.UU.'],
-  '604427':['US','Samoa Americana'], '604430':['US','Islas Marianas del Norte']
+  '636027':['US','U.S. State Department'], '636062':['US','U.S. Virgin Islands'],
+  '604427':['US','American Samoa'], '604430':['US','Northern Mariana Islands']
 };
 
 function handleBarcode(text) {
   lastBarcodeAt = performance.now();
   if (!isAAMVA(text)) {
-    // PDF417 que NO es AAMVA → cédula colombiana (formato propietario de la Registraduría).
-    setResult('colombia', 'BARCODE · Colombia', 'Cédula (PDF417 propietario, no-AAMVA)');
+    // A PDF417 that is NOT AAMVA → Colombian ID card (Registraduría proprietary format).
+    setResult('colombia', 'BARCODE · Colombia', 'ID card (proprietary PDF417, non-AAMVA)');
     return;
   }
   const i = text.indexOf('ANSI ');
   const iin = i !== -1 ? text.substr(i + 5, 6) : '';
   const issuer = AAMVA_ISSUERS[iin];
   if (issuer && issuer[0] === 'CA') {
-    setResult('canada', 'BARCODE · Canadá', issuer[1] + ' · licencia AAMVA · IIN ' + iin);
+    setResult('canada', 'BARCODE · Canada', issuer[1] + ' · AAMVA license · IIN ' + iin);
   } else if (issuer && issuer[0] === 'US') {
-    setResult('usa', 'BARCODE · EE.UU.', issuer[1] + ' · licencia AAMVA · IIN ' + iin);
+    setResult('usa', 'BARCODE · USA', issuer[1] + ' · AAMVA license · IIN ' + iin);
   } else if (issuer && issuer[0] === 'MX') {
-    setResult('mexico', 'BARCODE · México', issuer[1] + ' · licencia AAMVA · IIN ' + iin);
+    setResult('mexico', 'BARCODE · Mexico', issuer[1] + ' · AAMVA license · IIN ' + iin);
   } else {
-    // AAMVA válido pero IIN sin registrar (p. ej. Territorios del Noroeste): no adivinamos el país.
-    setResult('aamva', 'BARCODE · EE.UU./Canadá',
-              'Licencia AAMVA · IIN ' + iin + ' (jurisdicción no reconocida)');
+    // Valid AAMVA but an unregistered IIN (e.g. Northwest Territories): we don't guess the country.
+    setResult('aamva', 'BARCODE · USA/Canada',
+              'AAMVA license · IIN ' + iin + ' (unrecognized jurisdiction)');
   }
 }
 
-// Reconoce la "forma" de un MRZ sin necesidad de leerlo perfecto:
-// 2-3 líneas largas, monoespaciadas, casi solo [A-Z0-9<] y con relleno '<<'.
+// Recognizes the "shape" of an MRZ without needing to read it perfectly:
+// 2-3 long, monospaced lines, almost only [A-Z0-9<], with '<<' filler.
 function looksLikeMRZ(text) {
   const lines = text.split('\n')
     .map(l => l.replace(/\s+/g, '').toUpperCase())
@@ -216,11 +216,11 @@ function showFatal(msg) {
   statusEl.textContent = msg;
 }
 
-// Vuelve a "buscando" si pasa un rato sin nuevas detecciones.
+// Revert to "scanning" after a while with no new detections.
 setInterval(() => {
   if (mode === 'live' && performance.now() - lastResultAt > STICKY_MS && banner.className !== 'error') {
     banner.className = 'scanning';
-    banner.textContent = 'Apunta al documento…';
+    banner.textContent = 'Point at the document…';
     detail.textContent = '';
   }
 }, 300);
@@ -252,7 +252,7 @@ function drawSourceToWork(source, sw, sh) {
   wctx.drawImage(source, 0, 0, sw, sh, 0, 0, targetW, targetH);
   const img = wctx.getImageData(0, 0, targetW, targetH);
   const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {        // escala de grises (ayuda al OCR)
+  for (let i = 0; i < d.length; i += 4) {        // grayscale (helps OCR)
     const g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
     d[i] = d[i + 1] = d[i + 2] = g;
   }
@@ -266,23 +266,23 @@ function captureFrame() {
 }
 
 async function initOCR() {
-  statusEl.textContent = 'Cargando motor MRZ…';
+  statusEl.textContent = 'Loading MRZ engine…';
   ocrWorker = await Tesseract.createWorker('eng');
   await ocrWorker.setParameters({
     tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
-    tessedit_pageseg_mode: '6'   // bloque uniforme de texto
+    tessedit_pageseg_mode: '6'   // uniform block of text
   });
-  statusEl.textContent = 'Listo. Apunta al documento.';
+  statusEl.textContent = 'Ready. Point at the document.';
 }
 
-function ensureOCR() {                  // inicializa el motor una sola vez
+function ensureOCR() {                  // initialize the engine only once
   if (!ocrInitPromise) ocrInitPromise = initOCR();
   return ocrInitPromise;
 }
 
 async function ocrTick() {
   if (mode !== 'live' || !ocrWorker || ocrBusy) return;
-  // El barcode tiene prioridad: si acabamos de ver uno, no malgastamos OCR.
+  // The barcode has priority: if we just saw one, don't waste OCR.
   if (performance.now() - lastBarcodeAt < 1200) return;
   const canvas = captureFrame();
   if (!canvas) return;
@@ -290,14 +290,14 @@ async function ocrTick() {
   try {
     const { data } = await ocrWorker.recognize(canvas);
     if (looksLikeMRZ(data.text) && performance.now() - lastBarcodeAt > 1000) {
-      setResult('mrz', 'MRZ', 'Zona de lectura mecánica detectada');
+      setResult('mrz', 'MRZ', 'Machine-readable zone detected');
     }
-  } catch (e) { /* ignorar fallos puntuales de OCR */ }
+  } catch (e) { /* ignore occasional OCR failures */ }
   ocrBusy = false;
 }
 setInterval(ocrTick, 700);
 
-/* ───────────────────── Cámara / arranque ───────────────────── */
+/* ───────────────────── Camera / startup ───────────────────── */
 
 async function listCameras(preferredId) {
   const devices = await navigator.mediaDevices.enumerateDevices();
@@ -306,7 +306,7 @@ async function listCameras(preferredId) {
   cams.forEach((c, i) => {
     const opt = document.createElement('option');
     opt.value = c.deviceId;
-    opt.textContent = c.label || ('Cámara ' + (i + 1));
+    opt.textContent = c.label || ('Camera ' + (i + 1));
     cameraSelect.appendChild(opt);
   });
   if (preferredId) cameraSelect.value = preferredId;
@@ -314,35 +314,35 @@ async function listCameras(preferredId) {
 
 async function main() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showFatal('Este navegador no soporta acceso a la cámara.');
+    showFatal('This browser does not support camera access.');
     return;
   }
   const localhost = ['localhost', '127.0.0.1'].includes(location.hostname);
   if (!window.isSecureContext && !localhost) {
-    showFatal('La cámara necesita https o localhost. No abras el archivo con doble clic (file://); sírvelo con un servidor local. Ver README.');
+    showFatal('The camera needs https or localhost. Don\'t open the file by double-clicking (file://); serve it with a local server. See the README.');
     return;
   }
   try {
-    // 1) Permiso + cámara trasera por defecto (en móvil).
+    // 1) Permission + rear camera by default (on mobile).
     const tmp = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
     const preferred = tmp.getVideoTracks()[0].getSettings().deviceId;
     tmp.getTracks().forEach(t => t.stop());
     await listCameras(preferred);
-    // 2) Arrancar escáner de barcode + OCR de MRZ.
+    // 2) Start the barcode scanner + MRZ OCR.
     await startScanner(cameraSelect.value || preferred);
     ensureOCR();
-    statusEl.textContent = 'Buscando barcode o MRZ…';
+    statusEl.textContent = 'Looking for a barcode or MRZ…';
   } catch (e) {
-    showFatal('No se pudo acceder a la cámara: ' + (e && e.message ? e.message : e));
+    showFatal('Could not access the camera: ' + (e && e.message ? e.message : e));
   }
 }
 
-/* ───────────────────── Imagen subida ───────────────────── */
+/* ───────────────────── Uploaded image ───────────────────── */
 
 async function processImage(file) {
   mode = 'image';
   startScreen.style.display = 'none';
-  if (codeReader) { try { codeReader.reset(); } catch (e) {} }   // pausa la cámara en vivo
+  if (codeReader) { try { codeReader.reset(); } catch (e) {} }   // pause the live camera
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.onload = async () => {
@@ -350,8 +350,8 @@ async function processImage(file) {
     photo.style.display = 'block';
     video.style.display = 'none';
     document.getElementById('guide').style.display = 'none';
-    statusEl.textContent = 'Analizando imagen…';
-    setResult('scanning', 'Analizando…', '');
+    statusEl.textContent = 'Analyzing image…';
+    setResult('scanning', 'Analyzing…', '');
 
     let found = false;
     // 1) Barcode (PDF417)
@@ -359,23 +359,23 @@ async function processImage(file) {
       const imgReader = new ZXing.BrowserMultiFormatReader(hints);
       const result = await imgReader.decodeFromImageElement(img);
       if (result) { handleBarcode(result.getText()); found = true; }
-    } catch (e) { /* sin barcode en la imagen */ }
+    } catch (e) { /* no barcode in the image */ }
 
-    // 2) MRZ (si no había barcode)
+    // 2) MRZ (if there was no barcode)
     if (!found) {
-      statusEl.textContent = 'Buscando MRZ…';
+      statusEl.textContent = 'Looking for MRZ…';
       await ensureOCR();
       try {
         const canvas = drawSourceToWork(img, img.naturalWidth, img.naturalHeight);
         const { data } = await ocrWorker.recognize(canvas);
-        if (looksLikeMRZ(data.text)) { setResult('mrz', 'MRZ', 'Zona de lectura mecánica detectada'); found = true; }
-      } catch (e) { /* ignorar */ }
+        if (looksLikeMRZ(data.text)) { setResult('mrz', 'MRZ', 'Machine-readable zone detected'); found = true; }
+      } catch (e) { /* ignore */ }
     }
 
-    if (!found) setResult('notfound', 'No detectado', 'No se encontró barcode ni MRZ en la imagen');
-    statusEl.textContent = 'Imagen analizada · pulsa ↻ para volver a la cámara.';
+    if (!found) setResult('notfound', 'Not detected', 'No barcode or MRZ found in the image');
+    statusEl.textContent = 'Image analyzed · tap ↻ to go back to the camera.';
   };
-  img.onerror = () => showFatal('No se pudo cargar la imagen.');
+  img.onerror = () => showFatal('Could not load the image.');
   img.src = url;
 }
 
@@ -385,13 +385,13 @@ async function backToLive() {
   if (photo.src) { URL.revokeObjectURL(photo.src); photo.removeAttribute('src'); }
   video.style.display = 'block';
   document.getElementById('guide').style.display = 'block';
-  setResult('scanning', 'Apunta al documento…', '');
-  statusEl.textContent = 'Buscando barcode o MRZ…';
+  setResult('scanning', 'Point at the document…', '');
+  statusEl.textContent = 'Looking for a barcode or MRZ…';
   try { await startScanner(cameraSelect.value); }
-  catch (e) { showFatal('No se pudo abrir la cámara: ' + (e && e.message ? e.message : e)); }
+  catch (e) { showFatal('Could not open the camera: ' + (e && e.message ? e.message : e)); }
 }
 
-/* ───────────────────── Eventos ───────────────────── */
+/* ───────────────────── Events ───────────────────── */
 
 startBtn.addEventListener('click', () => { startScreen.style.display = 'none'; main(); });
 cameraSelect.addEventListener('change', () => { if (mode === 'live') startScanner(cameraSelect.value); });
@@ -399,7 +399,7 @@ restartBtn.addEventListener('click', () => backToLive());
 fileInput.addEventListener('change', (e) => {
   const file = e.target.files && e.target.files[0];
   if (file) processImage(file);
-  e.target.value = '';   // permite volver a subir el mismo archivo
+  e.target.value = '';   // allow re-uploading the same file
 });
 </script>
 </body>
