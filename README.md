@@ -1,7 +1,7 @@
 # Barcode or MRZ?
 
-A page that identifies **in real time with the camera (without taking a photo)** whether what you
-show it is:
+A page that identifies — by **capturing a photo with the camera** (or uploading an image) — whether
+what you show it is:
 
 - **MRZ** — machine-readable zone (passports, ID cards, visas).
 - **BARCODE · USA** — AAMVA driver's license from a US state (PDF417).
@@ -37,15 +37,18 @@ Then open **http://localhost:8000** in your browser.
 
 It's also already deployed via GitHub Pages: **https://dclemares.github.io/iv-barcode-or-mrz/**
 
-Tap **"Start camera"**, accept the permission, and point at the document inside the frame.
+Tap **"Start camera"**, accept the permission, frame the document inside the box, and tap
+**📷 Capture**. The camera is a live preview only; analysis runs on the captured still (you can
+also **Upload image** instead). On Android/Chrome the still is taken at full resolution via
+`ImageCapture.takePhoto()`; elsewhere it falls back to the current preview frame.
 
 ## How it works (quick)
 
 - **Barcode (instant):** the page tries the browser's native `BarcodeDetector` first (on
   Chrome/macOS & Android it's OS-backed and handles dense/low-quality PDF417 well), then falls back
-  to [ZXing](https://github.com/zxing-js/library) and `zxing-wasm`. For uploaded images and live
-  frames it also looks for a dense PDF417-like band before OCR can claim MRZ, with relaxed fallback
-  passes for low-contrast or blurred barcodes. If the content carries a structured AAMVA header →
+  to [ZXing](https://github.com/zxing-js/library) and `zxing-wasm`. On the captured photo (or an
+  uploaded image) it also looks for a dense PDF417-like band before OCR can claim MRZ, with relaxed
+  fallback passes for low-contrast or blurred barcodes. If the content carries a structured AAMVA header →
   USA/Canada/Mexico where the IIN is known; if it decodes but isn't AAMVA → Colombia. If a
   PDF417-like barcode is clearly present in the lower Colombian ID-card position but can't be
   decoded, the page runs a secondary layout OCR check for Colombian front-side labels before
