@@ -102,15 +102,27 @@ test('debug logging keeps diagnostics but does not print raw OCR or barcode payl
   assert.doesNotMatch(html, /dbg\('DECODED from crop:[\s\S]*?text\.replace/);
 });
 
-test('live scanning checks for an unreadable barcode band before OCR can classify MRZ', () => {
-  const start = html.indexOf('async function liveTick()');
-  const end = html.indexOf('// Render a source', start);
-  assert.notEqual(start, -1, 'Missing liveTick');
-  assert.notEqual(end, -1, 'Missing liveTick end marker');
-  const liveTick = html.slice(start, end);
+test('photo analysis checks for a barcode band before OCR can classify MRZ', () => {
+  const start = html.indexOf('async function analyzeSource');
+  const end = html.indexOf('async function capturePhoto', start);
+  assert.notEqual(start, -1, 'Missing analyzeSource');
+  assert.notEqual(end, -1, 'Missing analyzeSource end marker');
+  const analyze = html.slice(start, end);
 
-  assert.match(liveTick, /findBarcodeBand/);
+  const bandIdx = analyze.indexOf('findBarcodeBand');
+  const mrzIdx = analyze.indexOf('detectMRZ');
+  assert.notEqual(bandIdx, -1, 'analyzeSource should check findBarcodeBand');
+  assert.notEqual(mrzIdx, -1, 'analyzeSource should check detectMRZ');
+  assert.ok(bandIdx < mrzIdx, 'the barcode band must be checked before MRZ');
   assert.match(html, /function handleUnreadableBarcode/);
+});
+
+test('the camera is preview-only — no continuous live scanning loops', () => {
+  assert.doesNotMatch(html, /setInterval\(liveTick/);
+  assert.doesNotMatch(html, /setInterval\(ocrTick/);
+  assert.doesNotMatch(html, /decodeFromVideoDevice/);
+  assert.match(html, /function capturePhoto/);
+  assert.match(html, /function startPreview/);
 });
 
 test('remote MRZ model is pinned instead of loading the moving master branch', () => {

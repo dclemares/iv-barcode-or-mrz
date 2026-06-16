@@ -76,12 +76,12 @@
     <div id="guide"></div>
     <div id="ver"></div>
     <div id="overlay">
-      <div id="banner" class="scanning">Point at the document…</div>
+      <div id="banner" class="scanning">Frame the document, then tap 📷</div>
       <div id="detail"></div>
     </div>
     <div id="start">
       <h1>Barcode or MRZ?</h1>
-      <p>Identifies in real time whether what you show the camera is an <b>MRZ</b>,
+      <p>Frame a document and tap <b>📷 Capture</b>; it tells you whether it's an <b>MRZ</b>,
          a <b>US/Canada driver-license barcode</b>, or a <b>Colombian ID-card barcode</b>.</p>
       <button id="startBtn">▶ Start camera</button>
       <label class="btnlike" for="fileInput">📁 Upload image</label>
@@ -89,6 +89,7 @@
   </div>
   <div id="controls">
     <select id="cameraSelect" title="Camera"></select>
+    <button id="captureBtn" title="Take photo">📷 Capture</button>
     <label class="iconbtn" for="fileInput" title="Upload image">📁</label>
     <button id="restartBtn" title="Back to camera">↻</button>
     <button id="dbgBtn" title="Show/hide log">🐞</button>
@@ -126,12 +127,13 @@ const cameraSelect = document.getElementById('cameraSelect');
 const startScreen  = document.getElementById('start');
 const startBtn     = document.getElementById('startBtn');
 const restartBtn   = document.getElementById('restartBtn');
+const captureBtn   = document.getElementById('captureBtn');
 const fileInput    = document.getElementById('fileInput');
 const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v23 (live-path diagnostics)';
+const VERSION = 'build 2026-06-16 · v24 (capture & analyze)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm ready: ' + (window.__zxingReadBarcodes ? 'OK — strong PDF417 decoder active' : 'FUNCTION MISSING')));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -142,11 +144,10 @@ function dbgClear() { debugEl.textContent = ''; }
 document.getElementById('ver').textContent = VERSION;
 debugEl.textContent = VERSION + ' — log ready. Debug stays visible, but OCR/barcode payloads are summarized.';
 
-let codeReader  = null;   // ZXing
+let currentStream = null; // live camera MediaStream (preview only)
 let ocrWorker   = null;   // Tesseract
 let latinWorker = null;   // Tesseract eng, only for Colombian front-side label confirmation
 let ocrLang     = '';     // 'OCRB' (MRZ model) or 'eng' (fallback)
-let ocrBusy     = false;
 let lastResultAt  = 0;
 let lastBarcodeAt = -99999;
 let mode = 'live';        // 'live' (camera) | 'image' (uploaded image)
@@ -339,7 +340,7 @@ function handleUnreadableBarcode(sub, countryHint) {
 setInterval(() => {
   if (mode === 'live' && performance.now() - lastResultAt > STICKY_MS && banner.className !== 'error') {
     banner.className = 'scanning';
-    banner.textContent = 'Point at the document…';
+    banner.textContent = 'Frame the document, then tap 📷';
     detail.textContent = '';
   }
 }, 300);
@@ -364,51 +365,26 @@ let nativeDetector = null;
   } catch (e) { nativeDetector = null; dbg('BarcodeDetector error: ' + (e.message || e)); }
 })();
 
-async function startScanner(deviceId) {
-  if (codeReader) { try { codeReader.reset(); } catch (e) {} }
-  codeReader = new ZXing.BrowserMultiFormatReader(hints, 150);
-  await codeReader.decodeFromVideoDevice(deviceId || undefined, video, (result) => {
-    if (result) { dbgPayload('Live ZXing(stream) decoded', result.getText()); handleBarcode(result.getText()); }
-  });
+// The camera is a PREVIEW only — no continuous scanning. The user frames the document and taps
+// 📷 Capture; the captured still then runs through the SAME pipeline as an uploaded image
+// (decodeBarcode → band check → MRZ OCR), which is far more reliable than per-frame live decoding.
+async function startPreview(deviceId) {
+  stopLive();
+  const base = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } };
+  // Ask for the highest resolution the device offers — a dense PDF417 / small MRZ needs the pixels.
+  const constraints = { audio: false, video: Object.assign(base, { width: { ideal: 3840 }, height: { ideal: 2160 } }) };
+  currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+  video.srcObject = currentStream;
+  try { await video.play(); } catch (e) {}
+  const s = currentStream.getVideoTracks()[0].getSettings();
+  dbg('Camera preview: ' + (s.width || '?') + '×' + (s.height || '?'));
+  mode = 'live';
 }
 
-// Live: besides ZXing's continuous scan, poll the stronger decoders (wasm + native) on the
-// current frame — they catch PDF417 (incl. AAMVA) that pure-JS ZXing misses live.
-let liveBusy = false;
-let lastLoggedW = 0;
-async function liveTick() {
-  if (mode !== 'live' || liveBusy || !video.videoWidth) return;
-  if (performance.now() - lastBarcodeAt < 1200) return;
-  liveBusy = true;
-  try {
-    const W = video.videoWidth, H = video.videoHeight;
-    if (W !== lastLoggedW) { dbg('Live camera resolution: ' + W + '×' + H); lastLoggedW = W; }
-    const canvas = toCanvas(video, W, H, Math.min(1280, W));
-    let t = await wasmDecode(canvas);
-    if (t) dbgPayload('Live wasm decoded', t);
-    if (!t) { t = await nativeDecode(video); if (t) dbgPayload('Live native decoded', t); }
-    if (t) { handleBarcode(t); return; }
-    const band = findBarcodeBand(video, W, H);
-    if (band) {
-      dbg('Live barcode band at y≈' + band.y0 + '–' + band.y1 + ' (frame ' + W + '×' + H + ')');
-      t = await decodeCanvas(cropCanvas(video, W, H, band.y0, band.y1, Math.min(1600, Math.round(W * 1.5))));
-      if (t) { dbgPayload('Live crop decoded', t); handleBarcode(t); }
-      else {
-        const colombiaShape = looksLikeColombianIdBarcodeBand(W, H, band);
-        const colombiaConfirmed = colombiaShape && await confirmColombianIdLayout(video, W, H);
-        dbg('Live band undecodable → ' + (colombiaConfirmed ? 'BARCODE · Colombia (layout confirmed)' : 'BARCODE (unreadable)'));
-        handleUnreadableBarcode(
-          colombiaConfirmed
-            ? 'Colombian ID-card PDF417 detected by shape; move closer for content decoding'
-            : 'PDF417-like barcode band detected; move closer / improve light',
-          colombiaConfirmed ? 'colombia' : ''
-        );
-      }
-    }
-  } catch (e) { /* ignore */ }
-  finally { liveBusy = false; }
+function stopLive() {
+  if (currentStream) { currentStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} }); currentStream = null; }
+  video.srcObject = null;
 }
-setInterval(liveTick, 500);
 
 // Render a source (image/video) to a canvas at targetW (allow up to 2× upscale).
 function toCanvas(source, sw, sh, targetW) {
@@ -590,11 +566,6 @@ function ocrCanvas(source, sw, sh, targetW, cropTop, binarize) {
   return work;
 }
 
-function captureFrame() {
-  if (!video.videoWidth) return null;
-  return ocrCanvas(video, video.videoWidth, video.videoHeight, 1100, 0);
-}
-
 async function initOCR() {
   statusEl.textContent = 'Loading MRZ engine…';
 	  // Full LSTM MRZ model trained on the OCR-B passport font (DoubangoTelecom). The stock 'eng'
@@ -691,24 +662,6 @@ async function detectMRZ(source, sw, sh) {
   return false;
 }
 
-async function ocrTick() {
-  if (mode !== 'live' || !ocrWorker || ocrBusy) return;
-  // The barcode has priority: if we just saw one, don't waste OCR.
-  if (performance.now() - lastBarcodeAt < 1200) return;
-  const canvas = captureFrame();
-  if (!canvas) return;
-  ocrBusy = true;
-  try {
-    const { data } = await ocrWorker.recognize(canvas);
-    if (looksLikeMRZ(data.text) && performance.now() - lastBarcodeAt > 1000) {
-      dbg('Live OCR → MRZ shape matched (no recent barcode)');
-      setResult('mrz', 'MRZ', 'Machine-readable zone detected');
-    }
-  } catch (e) { /* ignore occasional OCR failures */ }
-  ocrBusy = false;
-}
-setInterval(ocrTick, 700);
-
 /* ───────────────────── Camera / startup ───────────────────── */
 
 async function listCameras(preferredId) {
@@ -735,15 +688,14 @@ async function main() {
     return;
   }
   try {
-    // 1) Permission + rear camera by default (on mobile).
-    const tmp = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
-    const preferred = tmp.getVideoTracks()[0].getSettings().deviceId;
-    tmp.getTracks().forEach(t => t.stop());
+    // 1) Permission + rear camera by default (on mobile), at the highest available resolution.
+    await startPreview();
+    const preferred = currentStream.getVideoTracks()[0].getSettings().deviceId;
     await listCameras(preferred);
-    // 2) Start the barcode scanner + MRZ OCR.
-    await startScanner(cameraSelect.value || preferred);
+    // 2) Warm up the MRZ OCR engine so the capture analysis is fast.
     ensureOCR();
-    statusEl.textContent = 'Looking for a barcode or MRZ…';
+    setResult('scanning', 'Frame the document, then tap 📷', '');
+    statusEl.textContent = 'Frame the document inside the box and tap 📷 Capture.';
   } catch (e) {
     showFatal('Could not access the camera: ' + (e && e.message ? e.message : e));
   }
@@ -751,81 +703,130 @@ async function main() {
 
 /* ───────────────────── Uploaded image ───────────────────── */
 
+// Show a captured/uploaded still in place of the live video.
+function showCaptured(url) {
+  photo.src = url;
+  photo.style.display = 'block';
+  video.style.display = 'none';
+  document.getElementById('guide').style.display = 'none';
+}
+
+function finishAnalysis() {
+  statusEl.textContent = 'Done · tap 📷 to capture again or ↻ for the camera.';
+}
+
+// The ONE analysis pipeline, shared by captured photos and uploaded images. Barcode first
+// (full image → upscaled bottom strip → tight band crop); a barcode BAND present means it's a
+// barcode, never an MRZ, so we stop there; only with no band do we run MRZ OCR.
+async function analyzeSource(source, W, H) {
+  dbgClear(); dbg('Analyzing ' + W + '×' + H + '…');
+  setResult('scanning', 'Analyzing…', '');
+
+  // 1) Decode the barcode — full image, then the upscaled bottom strip (where it usually sits).
+  statusEl.textContent = 'Looking for a barcode…';
+  let text = await decodeBarcode(source, W, H);
+  if (!text) {
+    dbg('Full-image decode failed; trying upscaled bottom strip…');
+    text = await decodeCanvas(cropCanvas(source, W, H, Math.floor(H * 0.45), H, 2000));
+  }
+  if (text) { dbgPayload('Barcode decoded', text); handleBarcode(text); finishAnalysis(); return; }
+  dbg('No barcode decoded.');
+
+  // 2) A barcode BAND present means it's a barcode — NOT an MRZ (the band is found via strong-edge
+  //    density, which an MRZ's plain text never reaches). Try to decode a tight, upscaled crop;
+  //    otherwise report an unreadable barcode. Either way we do NOT fall through to MRZ — barcode
+  //    noise OCRs as '<'-laden garbage and would false-trigger MRZ.
+  const band = findBarcodeBand(source, W, H);
+  if (band) {
+    dbg('Barcode band at y≈' + band.y0 + '–' + band.y1 + ' → it is a barcode; retrying decode on crop…');
+    text = await decodeCanvas(cropCanvas(source, W, H, band.y0, band.y1));
+    if (text) { dbgPayload('Barcode decoded from crop', text); handleBarcode(text); finishAnalysis(); return; }
+    const colombiaShape = looksLikeColombianIdBarcodeBand(W, H, band);
+    const colombiaConfirmed = colombiaShape && await confirmColombianIdLayout(source, W, H);
+    dbg('→ Result: barcode present but unreadable' + (colombiaConfirmed ? ' · Colombian ID layout' : ''));
+    handleUnreadableBarcode(
+      colombiaConfirmed ? 'Colombian ID-card PDF417 detected by shape; content could not be read' : '',
+      colombiaConfirmed ? 'colombia' : ''
+    );
+    finishAnalysis(); return;
+  }
+  dbg('No barcode band found.');
+
+  // 3) No barcode at all → check for MRZ (now safe from barcode '<' noise)
+  statusEl.textContent = 'Looking for MRZ…';
+  if (await detectMRZ(source, W, H)) { dbg('→ Result: MRZ'); setResult('mrz', 'MRZ', 'Machine-readable zone detected'); finishAnalysis(); return; }
+  dbg('→ MRZ pattern not matched.');
+
+  dbg('→ Result: Not detected');
+  setResult('notfound', 'Not detected', 'No barcode or MRZ found in the image');
+  finishAnalysis();
+}
+
+// Capture a still from the live camera and analyze it as an image. In image mode 📷 reframes
+// (returns to the live preview) so the user can capture again.
+async function capturePhoto() {
+  if (mode === 'image') { await backToLive(); return; }
+  if (!currentStream) return;
+  const track = currentStream.getVideoTracks()[0];
+  let source = null, W = 0, H = 0;
+  // Best quality: a full-resolution still via ImageCapture (Android Chrome), independent of the
+  // preview size. Falls back to the current preview frame (e.g. iOS Safari has no ImageCapture).
+  try {
+    if (window.ImageCapture && track && track.readyState === 'live') {
+      const blob = await new ImageCapture(track).takePhoto();
+      source = await createImageBitmap(blob);
+      W = source.width; H = source.height;
+      dbg('Captured via ImageCapture: ' + W + '×' + H);
+    }
+  } catch (e) { dbg('ImageCapture.takePhoto failed (' + (e && e.message ? e.message : e) + ') → using preview frame'); }
+  if (!source) {
+    W = video.videoWidth; H = video.videoHeight;
+    if (!W) { statusEl.textContent = 'Camera not ready yet — try again.'; return; }
+    source = video;
+    dbg('Captured preview frame: ' + W + '×' + H);
+  }
+  // Freeze the still on a canvas (used both for display and analysis), then release the camera.
+  const cap = document.createElement('canvas');
+  cap.width = W; cap.height = H;
+  cap.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, 0, W, H);
+  if (source.close) { try { source.close(); } catch (e) {} }
+  mode = 'image';
+  stopLive();
+  showCaptured(cap.toDataURL('image/jpeg', 0.92));
+  await analyzeSource(cap, W, H);
+}
+
 async function processImage(file) {
   mode = 'image';
   startScreen.style.display = 'none';
-  if (codeReader) { try { codeReader.reset(); } catch (e) {} }   // pause the live camera
+  stopLive();
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.onload = async () => {
-    photo.src = url;
-    photo.style.display = 'block';
-    video.style.display = 'none';
-    document.getElementById('guide').style.display = 'none';
-    const W = img.naturalWidth, H = img.naturalHeight;
-    const done = () => { statusEl.textContent = 'Image analyzed · tap ↻ to go back to the camera.'; };
-    dbgClear(); dbg('Image ' + W + '×' + H + ' — analyzing…');
-    setResult('scanning', 'Analyzing…', '');
-
-    // 1) Decode the barcode — full image, then the upscaled bottom strip (where it usually sits).
-    statusEl.textContent = 'Looking for a barcode…';
-    let text = await decodeBarcode(img, W, H);
-    if (!text) {
-      dbg('Full-image decode failed; trying upscaled bottom strip…');
-      text = await decodeCanvas(cropCanvas(img, W, H, Math.floor(H * 0.45), H, 2000));
-    }
-	    if (text) { dbgPayload('Barcode decoded', text); handleBarcode(text); done(); return; }
-    dbg('No barcode decoded.');
-
-    // 2) A barcode BAND present means it's a barcode — NOT an MRZ (the band is found via strong-edge
-    //    density, which an MRZ's plain text never reaches). Try to decode a tight, upscaled crop;
-    //    otherwise report an unreadable barcode. Either way we do NOT fall through to MRZ — barcode
-    //    noise OCRs as '<'-laden garbage and would false-trigger MRZ.
-    const band = findBarcodeBand(img, W, H);
-    if (band) {
-      dbg('Barcode band at y≈' + band.y0 + '–' + band.y1 + ' → it is a barcode; retrying decode on crop…');
-      text = await decodeCanvas(cropCanvas(img, W, H, band.y0, band.y1));
-      if (text) { dbgPayload('Barcode decoded from crop', text); handleBarcode(text); done(); return; }
-      const colombiaShape = looksLikeColombianIdBarcodeBand(W, H, band);
-      const colombiaConfirmed = colombiaShape && await confirmColombianIdLayout(img, W, H);
-      dbg('→ Result: barcode present but unreadable' + (colombiaConfirmed ? ' · Colombian ID layout' : ''));
-      handleUnreadableBarcode(
-        colombiaConfirmed ? 'Colombian ID-card PDF417 detected by shape; content could not be read' : '',
-        colombiaConfirmed ? 'colombia' : ''
-      );
-      done(); return;
-    }
-    dbg('No barcode band found.');
-
-    // 3) No barcode at all → check for MRZ (now safe from barcode '<' noise)
-    statusEl.textContent = 'Looking for MRZ…';
-    if (await detectMRZ(img, W, H)) { dbg('→ Result: MRZ'); setResult('mrz', 'MRZ', 'Machine-readable zone detected'); done(); return; }
-    dbg('→ MRZ pattern not matched.');
-
-    dbg('→ Result: Not detected');
-    setResult('notfound', 'Not detected', 'No barcode or MRZ found in the image');
-    done();
+    showCaptured(url);
+    await analyzeSource(img, img.naturalWidth, img.naturalHeight);
   };
   img.onerror = () => showFatal('Could not load the image.');
   img.src = url;
 }
 
 async function backToLive() {
-  mode = 'live';
   photo.style.display = 'none';
-  if (photo.src) { URL.revokeObjectURL(photo.src); photo.removeAttribute('src'); }
+  if (photo.src) { try { URL.revokeObjectURL(photo.src); } catch (e) {} photo.removeAttribute('src'); }
   video.style.display = 'block';
   document.getElementById('guide').style.display = 'block';
-  setResult('scanning', 'Point at the document…', '');
-  statusEl.textContent = 'Looking for a barcode or MRZ…';
-  try { await startScanner(cameraSelect.value); }
-  catch (e) { showFatal('Could not open the camera: ' + (e && e.message ? e.message : e)); }
+  setResult('scanning', 'Frame the document, then tap 📷', '');
+  try {
+    await startPreview(cameraSelect.value);
+    statusEl.textContent = 'Frame the document inside the box and tap 📷 Capture.';
+  } catch (e) { showFatal('Could not open the camera: ' + (e && e.message ? e.message : e)); }
 }
 
 /* ───────────────────── Events ───────────────────── */
 
 startBtn.addEventListener('click', () => { startScreen.style.display = 'none'; main(); });
-cameraSelect.addEventListener('change', () => { if (mode === 'live') startScanner(cameraSelect.value); });
+cameraSelect.addEventListener('change', () => { if (mode === 'live') startPreview(cameraSelect.value).catch((e) => showFatal('Camera error: ' + (e && e.message ? e.message : e))); });
+captureBtn.addEventListener('click', () => capturePhoto());
 restartBtn.addEventListener('click', () => backToLive());
 fileInput.addEventListener('change', (e) => {
   const file = e.target.files && e.target.files[0];
