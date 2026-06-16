@@ -231,12 +231,122 @@ const hints = new Map();
 hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.PDF_417]);
 hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
 
+// Native BarcodeDetector (when available + supports PDF417). On Chrome/macOS & Android it's
+// backed by the OS and decodes dense/low-quality PDF417 far better than ZXing-js.
+let nativeDetector = null;
+(async () => {
+  try {
+    if ('BarcodeDetector' in window) {
+      const formats = await window.BarcodeDetector.getSupportedFormats();
+      if (formats.includes('pdf417')) nativeDetector = new window.BarcodeDetector({ formats: ['pdf417'] });
+    }
+  } catch (e) { nativeDetector = null; }
+})();
+
 async function startScanner(deviceId) {
   if (codeReader) { try { codeReader.reset(); } catch (e) {} }
   codeReader = new ZXing.BrowserMultiFormatReader(hints, 150);
   await codeReader.decodeFromVideoDevice(deviceId || undefined, video, (result) => {
     if (result) handleBarcode(result.getText());
   });
+}
+
+// Live: also poll the native detector — it catches PDF417 that ZXing's continuous scan misses.
+async function nativeTick() {
+  if (mode !== 'live' || !nativeDetector || !video.videoWidth) return;
+  if (performance.now() - lastBarcodeAt < 1200) return;
+  try {
+    const codes = await nativeDetector.detect(video);
+    if (codes && codes.length) handleBarcode(codes[0].rawValue);
+  } catch (e) { /* ignore */ }
+}
+setInterval(nativeTick, 400);
+
+// Build a preprocessed canvas (grayscale + contrast or binarization), optionally upscaled,
+// to give ZXing a better shot at a low-contrast / dense scan.
+function preprocess(source, sw, sh, targetW, variant) {
+  const w = Math.min(targetW, Math.round(sw * 1.5));
+  const scale = w / sw;
+  const h = Math.round(sh * scale);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, sw, sh, 0, 0, w, h);
+  const id = ctx.getImageData(0, 0, w, h);
+  const d = id.data;
+  let sum = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    d[i] = d[i + 1] = d[i + 2] = g; sum += g;
+  }
+  const mean = sum / (w * h);
+  for (let i = 0; i < d.length; i += 4) {
+    let v;
+    if (variant === 'binary') v = d[i] < mean ? 0 : 255;
+    else { v = (d[i] - mean) * 1.6 + mean; v = v < 0 ? 0 : v > 255 ? 255 : v; }
+    d[i] = d[i + 1] = d[i + 2] = v;
+  }
+  ctx.putImageData(id, 0, 0);
+  return c;
+}
+
+// Decode a PDF417 from an image: native first, then ZXing, then ZXing on preprocessed variants.
+// Returns the decoded string, or null if nothing could be decoded.
+async function decodeBarcode(source, sw, sh) {
+  if (nativeDetector) {
+    try {
+      const codes = await nativeDetector.detect(source);
+      if (codes && codes.length) return codes[0].rawValue;
+    } catch (e) {}
+  }
+  const reader = new ZXing.BrowserMultiFormatReader(hints);
+  try {
+    const r = await reader.decodeFromImageElement(source);
+    if (r) return r.getText();
+  } catch (e) {}
+  for (const variant of ['contrast', 'binary']) {
+    for (const w of [Math.min(1600, sw), 1000]) {
+      try {
+        const canvas = preprocess(source, sw, sh, w, variant);
+        const r = await reader.decodeFromImageUrl(canvas.toDataURL());
+        if (r) return r.getText();
+      } catch (e) {}
+    }
+  }
+  return null;
+}
+
+// Heuristic "is a barcode visibly present?" — last resort when nothing decoded and there's no MRZ.
+// Looks for a contiguous band of rows with very high black/white transition density (the signature
+// of a 1D/PDF417 barcode), which plain printed text doesn't reach.
+function detectBarcodeBand(source, sw, sh) {
+  const W = Math.min(900, sw);
+  const scale = W / sw;
+  const H = Math.round(sh * scale);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, sw, sh, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const gray = new Uint8Array(W * H);
+  let sum = 0;
+  for (let p = 0, q = 0; p < d.length; p += 4, q++) {
+    const g = (d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114) | 0;
+    gray[q] = g; sum += g;
+  }
+  const thresh = sum / (W * H);
+  const minTransitions = W * 0.18;
+  let run = 0, maxRun = 0;
+  for (let y = 0; y < H; y++) {
+    let tr = 0, prev = gray[y * W] < thresh ? 0 : 1;
+    for (let x = 1; x < W; x++) {
+      const cur = gray[y * W + x] < thresh ? 0 : 1;
+      if (cur !== prev) { tr++; prev = cur; }
+    }
+    if (tr >= minTransitions) { run++; if (run > maxRun) maxRun = run; }
+    else run = 0;
+  }
+  return maxRun >= Math.max(8, H * 0.03);
 }
 
 /* ───────────────────── MRZ (Tesseract OCR) ───────────────────── */
@@ -350,30 +460,32 @@ async function processImage(file) {
     photo.style.display = 'block';
     video.style.display = 'none';
     document.getElementById('guide').style.display = 'none';
-    statusEl.textContent = 'Analyzing image…';
+    const W = img.naturalWidth, H = img.naturalHeight;
+    const done = () => { statusEl.textContent = 'Image analyzed · tap ↻ to go back to the camera.'; };
     setResult('scanning', 'Analyzing…', '');
 
-    let found = false;
-    // 1) Barcode (PDF417)
-    try {
-      const imgReader = new ZXing.BrowserMultiFormatReader(hints);
-      const result = await imgReader.decodeFromImageElement(img);
-      if (result) { handleBarcode(result.getText()); found = true; }
-    } catch (e) { /* no barcode in the image */ }
+    // 1) Barcode decode (native → ZXing → preprocessed variants)
+    statusEl.textContent = 'Looking for a barcode…';
+    const text = await decodeBarcode(img, W, H);
+    if (text) { handleBarcode(text); done(); return; }
 
-    // 2) MRZ (if there was no barcode)
-    if (!found) {
-      statusEl.textContent = 'Looking for MRZ…';
-      await ensureOCR();
-      try {
-        const canvas = drawSourceToWork(img, img.naturalWidth, img.naturalHeight);
-        const { data } = await ocrWorker.recognize(canvas);
-        if (looksLikeMRZ(data.text)) { setResult('mrz', 'MRZ', 'Machine-readable zone detected'); found = true; }
-      } catch (e) { /* ignore */ }
+    // 2) MRZ
+    statusEl.textContent = 'Looking for MRZ…';
+    await ensureOCR();
+    try {
+      const { data } = await ocrWorker.recognize(drawSourceToWork(img, W, H));
+      if (looksLikeMRZ(data.text)) { setResult('mrz', 'MRZ', 'Machine-readable zone detected'); done(); return; }
+    } catch (e) { /* ignore */ }
+
+    // 3) A barcode is clearly present but couldn't be decoded, and there's no MRZ → likely Colombia
+    if (detectBarcodeBand(img, W, H)) {
+      setResult('colombia', 'BARCODE · Colombia?',
+                'PDF417 detected but not decoded — likely a Colombian ID card');
+      done(); return;
     }
 
-    if (!found) setResult('notfound', 'Not detected', 'No barcode or MRZ found in the image');
-    statusEl.textContent = 'Image analyzed · tap ↻ to go back to the camera.';
+    setResult('notfound', 'Not detected', 'No barcode or MRZ found in the image');
+    done();
   };
   img.onerror = () => showFatal('Could not load the image.');
   img.src = url;

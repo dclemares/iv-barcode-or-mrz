@@ -41,9 +41,13 @@ Tap **"Start camera"**, accept the permission, and point at the document inside 
 
 ## How it works (quick)
 
-- **Barcode (instant):** [ZXing](https://github.com/zxing-js/library) decodes the PDF417 live. If
-  the content carries the AAMVA header → USA/Canada (separated by IIN); if it decodes but isn't
-  AAMVA → Colombia.
+- **Barcode (instant):** the page tries the browser's native `BarcodeDetector` first (on
+  Chrome/macOS & Android it's OS-backed and handles dense/low-quality PDF417 well), then falls back
+  to [ZXing](https://github.com/zxing-js/library). For uploaded images it also retries ZXing on
+  preprocessed variants (grayscale + contrast/binarization, a couple of scales). If the content
+  carries the AAMVA header → USA/Canada (separated by IIN); if it decodes but isn't AAMVA →
+  Colombia. If a PDF417 is clearly present but can't be decoded (and there's no MRZ), it's reported
+  as `BARCODE · Colombia?`.
 - **MRZ:** lightweight OCR ([Tesseract.js](https://tesseract.projectnaptha.com/)) over the
   downscaled frame; it doesn't read the full text, only recognizes the **shape** of the MRZ (lines
   of 30/36/44 characters with `<<` filler). The engine is warmed up on load so the first detection
