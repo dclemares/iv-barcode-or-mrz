@@ -11,6 +11,8 @@ classifies what it's shown into one of these types:
 - **BARCODE · USA** — AAMVA driver's license from a US state (PDF417).
 - **BARCODE · Canada** — AAMVA driver's license from a Canadian province (PDF417).
 - **BARCODE · Colombia** — Colombian ID card (proprietary PDF417).
+- **BARCODE (unreadable)** — a PDF417-like barcode band is present, but its content could not be
+  decoded safely.
 
 ## Decisions (brainstorming)
 
@@ -22,22 +24,33 @@ classifies what it's shown into one of these types:
 
 Two detectors run in parallel over the live video:
 
-1. **Barcode (PDF417) with ZXing** — fast. On decode:
-   - Content with an AAMVA header (`@` start and/or `"ANSI "` + IIN) → license. **USA vs Canada** is
-     separated by mapping the IIN (6 digits after `ANSI `) to its jurisdiction via the embedded AAMVA
-     registry; the state/province is shown. Unregistered IIN → generic `USA/Canada` (the country is
-     not guessed).
+1. **Barcode (PDF417) with native BarcodeDetector, ZXing, and zxing-wasm** — fast. On decode:
+   - Content with a structured AAMVA header (`ANSI` + 6-digit IIN plus the compliance indicator or
+     AAMVA data elements) → license. **USA vs Canada** is separated by mapping the IIN to its
+     jurisdiction via the embedded AAMVA registry; recognized Mexican IINs are shown as Mexico.
+     Unregistered IIN → generic `AAMVA` (the country is not guessed).
    - A PDF417 that decodes but is **not** AAMVA → **Colombia (ID card)**.
+   - A PDF417-like band in the lower Colombian ID-card position that cannot be decoded →
+     a secondary layout OCR check for Colombian front-side labels. If confirmed, the result is
+     **BARCODE · Colombia** with an unreadable-content detail. Other undecodable bands remain
+     **BARCODE (unreadable)**. This takes priority over MRZ so barcode noise does not become a false
+     MRZ. Band detection uses strict thresholds first, then relaxed low-contrast passes that still
+     require a tall contiguous band.
 2. **MRZ with lightweight OCR (Tesseract.js)** — over the downscaled, grayscale frame. It doesn't
-   read the full text; it recognizes the *shape*: ≥2 lines of 24–48 characters made up almost only
-   of `[A-Z0-9<]` and with at least one `<<` filler.
+   use the full text; it recognizes the *shape*: 2-3 lines close to the official 30/36/44-character
+   MRZ lengths, with chevron filler. For low-quality screenshots, a single strong partial MRZ line
+   can also classify as MRZ after barcode has been ruled out.
 
-Arbitration: the barcode takes priority; OCR is skipped while a recent barcode exists. The result
-stays for 1.5 s before reverting to "scanning".
+Arbitration: the barcode takes priority; OCR is skipped while a recent decoded or unreadable barcode
+exists. The result stays for 1.5 s before reverting to "scanning".
+
+Debug remains visible by default, but raw OCR and barcode payloads are not printed. The log contains
+diagnostics such as payload length, control/printable counts, and detector path.
 
 ## Stack
 
-Plain HTML/JS. `@zxing/library@0.21.3` and `tesseract.js@5.1.1` via CDN (jsDelivr). No own server.
+Plain HTML/JS. `@zxing/library@0.21.3`, `zxing-wasm@1.3.5`, and `tesseract.js@5.1.1` via CDN
+(jsDelivr). The MRZ traineddata URL is pinned to an upstream commit. No own server.
 
 ## Constraints
 

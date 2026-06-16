@@ -9,11 +9,11 @@ show it is:
 - **BARCODE · Colombia** — Colombian ID card (proprietary PDF417).
 
 AAMVA licenses and the Colombian ID card both use PDF417, so they look the same: they're told apart
-by the **content** of the code (licenses carry the AAMVA header `@…ANSI …`; the ID card doesn't).
-Within AAMVA, **USA and Canada are separated by the IIN** (the 6 digits after `ANSI `), which
-identifies the issuing jurisdiction; the state/province is also shown. If the IIN isn't in the AAMVA
-registry (e.g. Northwest Territories, which has no registered IIN) it's labeled generically as
-`USA/Canada` instead of guessing the country.
+by the **content** of the code (licenses carry a structured AAMVA `ANSI` + IIN header; the ID card
+doesn't). Within AAMVA, **USA and Canada are separated by the IIN** (the 6 digits after `ANSI `),
+which identifies the issuing jurisdiction; the state/province is also shown. A couple of Mexican
+AAMVA IINs are recognized too. If the IIN isn't in the embedded registry, it's labeled generically
+as `AAMVA` instead of guessing the country.
 
 ## How to run it
 
@@ -43,16 +43,22 @@ Tap **"Start camera"**, accept the permission, and point at the document inside 
 
 - **Barcode (instant):** the page tries the browser's native `BarcodeDetector` first (on
   Chrome/macOS & Android it's OS-backed and handles dense/low-quality PDF417 well), then falls back
-  to [ZXing](https://github.com/zxing-js/library). For uploaded images it also retries ZXing on
-  preprocessed variants (grayscale + contrast/binarization, a couple of scales). If the content
-  carries the AAMVA header → USA/Canada (separated by IIN); if it decodes but isn't AAMVA →
-  Colombia. If a PDF417 is clearly present but can't be decoded (and there's no MRZ), it's reported
-  as `BARCODE · Colombia?`.
+  to [ZXing](https://github.com/zxing-js/library) and `zxing-wasm`. For uploaded images and live
+  frames it also looks for a dense PDF417-like band before OCR can claim MRZ, with relaxed fallback
+  passes for low-contrast or blurred barcodes. If the content carries a structured AAMVA header →
+  USA/Canada/Mexico where the IIN is known; if it decodes but isn't AAMVA → Colombia. If a
+  PDF417-like barcode is clearly present in the lower Colombian ID-card position but can't be
+  decoded, the page runs a secondary layout OCR check for Colombian front-side labels before
+  reporting `BARCODE · Colombia` with an unreadable-content detail. Other unreadable PDF417 bands
+  stay as `BARCODE (unreadable)`.
 - **MRZ:** lightweight OCR ([Tesseract.js](https://tesseract.projectnaptha.com/)) over the
-  downscaled frame; it doesn't read the full text, only recognizes the **shape** of the MRZ (lines
-  of 30/36/44 characters with `<<` filler). The engine is warmed up on load so the first detection
-  is fast.
+  downscaled frame; it doesn't use the full text, only recognizes the **shape** of the MRZ: 2-3
+  official-length lines (30/36/44 characters) with chevron filler, or a strong partial MRZ line in
+  low-quality screenshots. The MRZ model is pinned to a specific upstream commit so the behavior
+  doesn't change unexpectedly.
 - The barcode takes priority over OCR to avoid wasted work.
+- The debug log stays visible by default. It records diagnostics such as payload length and detector
+  path, but it does not print raw OCR or barcode payload text.
 
 ## Known limitations
 
@@ -62,5 +68,5 @@ Tap **"Start camera"**, accept the permission, and point at the document inside 
   scope. If other barcodes need to be supported later, it's worth adding a positive signature for
   the Registraduría format.
 - Northwest Territories has no registered AAMVA IIN in the sources used, so such a document would
-  fall under the generic `USA/Canada` label.
+  fall under the generic `AAMVA` label.
 - Requires a connection the first time (loads ZXing and Tesseract from a CDN).
