@@ -184,20 +184,20 @@ function handleBarcode(text) {
 // Recognizes the "shape" of an MRZ without needing to read it perfectly:
 // 2-3 long, monospaced lines, almost only [A-Z0-9<], with '<<' filler.
 function looksLikeMRZ(text) {
+  // Keep only MRZ characters per line (drop spaces / stray OCR punctuation), then look for ≥2 lines
+  // of MRZ length (TD1=30, TD2=36, TD3=44) with filler '<' runs — which plain text doesn't have.
   const lines = text.split('\n')
-    .map(l => l.replace(/\s+/g, '').toUpperCase())
-    .filter(l => l.length > 0);
-  let mrzLines = 0, hasDoubleFiller = false;
+    .map(l => l.toUpperCase().replace(/[^A-Z0-9<]/g, ''))
+    .filter(l => l.length >= 20);
+  let mrzLines = 0, hasRun = false;
   for (const line of lines) {
-    if (line.length < 24 || line.length > 48) continue;
-    const allowed = (line.match(/[A-Z0-9<]/g) || []).length;
+    if (line.length < 26 || line.length > 46) continue;
     const fillers = (line.match(/</g) || []).length;
-    if (allowed / line.length >= 0.85 && fillers >= 2) {
-      mrzLines++;
-      if (line.indexOf('<<') !== -1) hasDoubleFiller = true;
-    }
+    const alnum = (line.match(/[A-Z0-9]/g) || []).length;
+    if (fillers >= 1 && alnum >= 5) mrzLines++;
+    if (/<{2,}/.test(line)) hasRun = true;
   }
-  return mrzLines >= 2 && hasDoubleFiller;
+  return mrzLines >= 2 && hasRun;
 }
 
 /* ───────────────────── UI ───────────────────── */
@@ -354,25 +354,29 @@ function detectBarcodeBand(source, sw, sh) {
 const work = document.createElement('canvas');
 const wctx = work.getContext('2d', { willReadFrequently: true });
 
-function drawSourceToWork(source, sw, sh) {
-  const targetW = Math.min(960, sw);
-  const scale = targetW / sw;
-  const targetH = Math.round(sh * scale);
-  work.width = targetW; work.height = targetH;
-  wctx.drawImage(source, 0, 0, sw, sh, 0, 0, targetW, targetH);
-  const img = wctx.getImageData(0, 0, targetW, targetH);
-  const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {        // grayscale (helps OCR)
+// Render a (optionally bottom-cropped) grayscale canvas for OCR. Higher targetW = legible MRZ.
+// Tesseract does its own binarization, so we only grayscale here.
+function ocrCanvas(source, sw, sh, targetW, region) {
+  let cropY = 0, cropH = sh;
+  if (region === 'bottom') { cropY = Math.floor(sh * 0.42); cropH = sh - cropY; }
+  const w = Math.min(targetW, Math.round(sw * 2));   // allow up to 2× upscale for tiny docs
+  const scale = w / sw;
+  const h = Math.round(cropH * scale);
+  work.width = w; work.height = h;
+  wctx.drawImage(source, 0, cropY, sw, cropH, 0, 0, w, h);
+  const id = wctx.getImageData(0, 0, w, h);
+  const d = id.data;
+  for (let i = 0; i < d.length; i += 4) {
     const g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
     d[i] = d[i + 1] = d[i + 2] = g;
   }
-  wctx.putImageData(img, 0, 0);
+  wctx.putImageData(id, 0, 0);
   return work;
 }
 
 function captureFrame() {
   if (!video.videoWidth) return null;
-  return drawSourceToWork(video, video.videoWidth, video.videoHeight);
+  return ocrCanvas(video, video.videoWidth, video.videoHeight, 1100, 'full');
 }
 
 async function initOCR() {
@@ -380,7 +384,9 @@ async function initOCR() {
   ocrWorker = await Tesseract.createWorker('eng');
   await ocrWorker.setParameters({
     tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
-    tessedit_pageseg_mode: '6'   // uniform block of text
+    tessedit_pageseg_mode: '6',   // uniform block of text
+    load_system_dawg: '0',        // MRZ isn't dictionary words — stop Tesseract "correcting" it
+    load_freq_dawg: '0'
   });
   statusEl.textContent = 'Ready. Point at the document.';
 }
@@ -388,6 +394,20 @@ async function initOCR() {
 function ensureOCR() {                  // initialize the engine only once
   if (!ocrInitPromise) ocrInitPromise = initOCR();
   return ocrInitPromise;
+}
+
+// MRZ detection for an uploaded image: OCR at higher resolution, full frame then bottom crop.
+async function detectMRZ(source, sw, sh) {
+  await ensureOCR();
+  const targetW = Math.min(1700, Math.round(sw * 1.5));
+  for (const region of ['full', 'bottom']) {
+    try {
+      const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, region));
+      console.log('[MRZ OCR · ' + region + ']\n' + data.text);   // helps tuning if it ever misses
+      if (looksLikeMRZ(data.text)) return true;
+    } catch (e) { /* ignore */ }
+  }
+  return false;
 }
 
 async function ocrTick() {
@@ -471,11 +491,7 @@ async function processImage(file) {
 
     // 2) MRZ
     statusEl.textContent = 'Looking for MRZ…';
-    await ensureOCR();
-    try {
-      const { data } = await ocrWorker.recognize(drawSourceToWork(img, W, H));
-      if (looksLikeMRZ(data.text)) { setResult('mrz', 'MRZ', 'Machine-readable zone detected'); done(); return; }
-    } catch (e) { /* ignore */ }
+    if (await detectMRZ(img, W, H)) { setResult('mrz', 'MRZ', 'Machine-readable zone detected'); done(); return; }
 
     // 3) A barcode is clearly present but couldn't be decoded, and there's no MRZ → likely Colombia
     if (detectBarcodeBand(img, W, H)) {
