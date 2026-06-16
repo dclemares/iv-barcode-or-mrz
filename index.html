@@ -130,7 +130,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v10 (zxing-wasm decoder)';
+const VERSION = 'build 2026-06-16 · v11 (tolerant MRZ + tight crops)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm: ready (strong PDF417 decoder)'));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -219,20 +219,23 @@ function handleBarcode(text) {
 // Recognizes the "shape" of an MRZ without needing to read it perfectly:
 // 2-3 long, monospaced lines, almost only [A-Z0-9<], with '<<' filler.
 function looksLikeMRZ(text) {
-  // Keep only MRZ characters per line (drop spaces / stray OCR punctuation), then look for ≥2 lines
-  // of MRZ length (TD1=30, TD2=36, TD3=44) with filler '<' runs — which plain text doesn't have.
+  // Keep only MRZ characters per line (drop spaces / stray OCR punctuation). MRZ = 2-3 lines of
+  // length ~30/36/44 with long filler runs. We tolerate the OCR misreading '<' as a letter by also
+  // accepting a long run of ANY repeated character as a filler run.
   const lines = text.split('\n')
     .map(l => l.toUpperCase().replace(/[^A-Z0-9<]/g, ''))
     .filter(l => l.length >= 20);
   let mrzLines = 0, hasRun = false;
   for (const line of lines) {
     if (line.length < 26 || line.length > 46) continue;
-    const fillers = (line.match(/</g) || []).length;
-    const alnum = (line.match(/[A-Z0-9]/g) || []).length;
-    if (fillers >= 1 && alnum >= 5) mrzLines++;
-    if (/<{2,}/.test(line)) hasRun = true;
+    if ((line.match(/[A-Z0-9]/g) || []).length < 5) continue;
+    const run = /<{2,}/.test(line) || /(.)\1{3,}/.test(line);   // '<<' fillers OR 4+ same char
+    if (run || (line.match(/</g) || []).length >= 1) { mrzLines++; if (run) hasRun = true; }
   }
-  return mrzLines >= 2 && hasRun;
+  if (mrzLines >= 2 && hasRun) return true;
+  // Fallback for poor line segmentation: the whole text has multiple long '<' filler runs.
+  const joined = lines.join('');
+  return (joined.match(/<{3,}/g) || []).length >= 2 && joined.length >= 50;
 }
 
 /* ───────────────────── UI ───────────────────── */
@@ -427,9 +430,9 @@ const wctx = work.getContext('2d', { willReadFrequently: true });
 
 // Render a (optionally bottom-cropped) grayscale canvas for OCR. Higher targetW = legible MRZ.
 // Tesseract does its own binarization, so we only grayscale here.
-function ocrCanvas(source, sw, sh, targetW, region) {
-  let cropY = 0, cropH = sh;
-  if (region === 'bottom') { cropY = Math.floor(sh * 0.42); cropH = sh - cropY; }
+function ocrCanvas(source, sw, sh, targetW, cropTop) {
+  const cropY = Math.floor(sh * (cropTop || 0));
+  const cropH = sh - cropY;
   const w = Math.min(targetW, Math.round(sw * 2));   // allow up to 2× upscale for tiny docs
   const scale = w / sw;
   const h = Math.round(cropH * scale);
@@ -447,7 +450,7 @@ function ocrCanvas(source, sw, sh, targetW, region) {
 
 function captureFrame() {
   if (!video.videoWidth) return null;
-  return ocrCanvas(video, video.videoWidth, video.videoHeight, 1100, 'full');
+  return ocrCanvas(video, video.videoWidth, video.videoHeight, 1100, 0);
 }
 
 async function initOCR() {
@@ -476,12 +479,12 @@ async function detectMRZ(source, sw, sh) {
   try { await ensureOCR(); } catch (e) { dbg('OCR init FAILED: ' + (e.message || e)); return false; }
   if (!ocrWorker) { dbg('OCR worker not ready'); return false; }
   const targetW = Math.min(1700, Math.round(sw * 1.5));
-  for (const region of ['full', 'bottom']) {
+  for (const cropTop of [0, 0.5, 0.72]) {   // whole frame, then progressively tighter to the MRZ
     try {
-      const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, region));
-      dbg('[MRZ OCR · ' + region + ']\n' + (data.text || '(empty)').trim());
+      const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, cropTop));
+      dbg('[MRZ OCR · top=' + cropTop + ']\n' + (data.text || '(empty)').trim());
       if (looksLikeMRZ(data.text)) return true;
-    } catch (e) { dbg('OCR error (' + region + '): ' + (e.message || e)); }
+    } catch (e) { dbg('OCR error (top=' + cropTop + '): ' + (e.message || e)); }
   }
   return false;
 }
