@@ -1,0 +1,997 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Document reader (local)</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0f14; color: #e5e7eb;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #app { position: fixed; inset: 0; display: flex; flex-direction: column; }
+  #stage { position: relative; flex: 1; overflow: hidden; background: #000; }
+  #video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+    background: #000; display: none; }
+
+  /* Framing guide */
+  #guide { position: absolute; left: 8%; right: 8%; top: 28%; bottom: 28%;
+    border: 2px dashed rgba(255,255,255,.35); border-radius: 14px; pointer-events: none; }
+
+  /* Result banner */
+  #overlay { position: absolute; left: 0; right: 0; top: 0; padding: 16px;
+    display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
+  #banner { min-width: 60%; max-width: 92%; text-align: center; padding: 18px 22px;
+    border-radius: 16px; font-size: clamp(22px, 6vw, 40px); font-weight: 800; letter-spacing: .5px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.45); transition: background .15s ease; }
+  #detail { font-size: clamp(12px, 3.5vw, 16px); opacity: .9; text-align: center;
+    background: rgba(0,0,0,.45); padding: 4px 12px; border-radius: 10px; min-height: 1em; }
+
+  .scanning { background: #374151; }
+  .notfound { background: #4b5563; }
+  .mrz      { background: #2563eb; }
+  .usa      { background: #16a34a; }
+  .canada   { background: #d52b1e; }
+  .mexico   { background: #0d9488; }
+  .aamva    { background: #475569; }  /* AAMVA, unrecognized jurisdiction */
+  .colombia { background: #f59e0b; color: #1f2937; }
+  .error    { background: #7f1d1d; }
+
+  /* Controls */
+  #controls { display: flex; gap: 10px; align-items: center; padding: 10px 12px;
+    background: #0b0f14; border-top: 1px solid #1f2933; }
+  #cameraSelect { flex: 1; min-width: 0; padding: 10px; border-radius: 10px;
+    background: #1f2933; color: #e5e7eb; border: 1px solid #2d3a47; font-size: 14px; }
+  button { padding: 10px 14px; border-radius: 10px; border: 0; background: #2563eb;
+    color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; }
+  button:active { transform: translateY(1px); }
+  .btnlike { display: inline-flex; align-items: center; justify-content: center;
+    padding: 14px 24px; border-radius: 10px; background: #1f2933; color: #e5e7eb;
+    border: 1px solid #2d3a47; font-weight: 600; font-size: 16px; cursor: pointer; }
+  .iconbtn { display: inline-flex; align-items: center; justify-content: center;
+    padding: 10px 14px; border-radius: 10px; background: #1f2933; color: #e5e7eb;
+    border: 1px solid #2d3a47; font-size: 16px; cursor: pointer; }
+  #status { padding: 8px 12px; font-size: 13px; color: #9ca3af; background: #0b0f14;
+    border-top: 1px solid #1f2933; text-align: center; min-height: 1.2em; }
+  #ver { position: absolute; left: 8px; bottom: 8px; z-index: 4; font: 11px/1 monospace;
+    color: #cbd5e1; background: rgba(0,0,0,.5); padding: 3px 6px; border-radius: 6px; pointer-events: none; }
+  #fields { display: none; padding: 10px 14px; background: #0b0f14; border-top: 1px solid #1f2933;
+    max-height: 40vh; overflow: auto; }
+  .field-row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0;
+    border-bottom: 1px solid #161c24; font-size: 14px; }
+  .field-k { color: #9ca3af; white-space: nowrap; }
+  .field-v { color: #e5e7eb; font-weight: 600; text-align: right; word-break: break-word; }
+  #debug { max-height: 28vh; overflow: auto; margin: 0; padding: 8px 12px;
+    font: 11px/1.45 ui-monospace, Menlo, Consolas, monospace; color: #cbd5e1; background: #0b0f14;
+    border-top: 1px solid #1f2933; white-space: pre-wrap; word-break: break-all; }
+
+  /* Start screen */
+  #start { position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px; background: #0b0f14; z-index: 5; }
+  #start h1 { font-size: clamp(20px, 5vw, 28px); margin: 0; }
+  #start p { max-width: 420px; text-align: center; color: #9ca3af; margin: 0 16px; line-height: 1.5; }
+  #startBtn { font-size: 18px; padding: 14px 24px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <img id="photo" alt="">
+    <div id="guide"></div>
+    <div id="ver"></div>
+    <div id="overlay">
+      <div id="banner" class="scanning">Frame the document, then tap 📷</div>
+      <div id="detail"></div>
+    </div>
+    <div id="start">
+      <h1>Document reader</h1>
+      <p>Frame a document and tap <b>📷 Capture</b>; it classifies it and reads the data it can
+         from the <b>MRZ</b> or the <b>license barcode</b>. Fields it can't read stay empty.</p>
+      <button id="startBtn">▶ Start camera</button>
+      <label class="btnlike" for="fileInput">📁 Upload image</label>
+    </div>
+  </div>
+  <div id="fields"></div>
+  <div id="controls">
+    <select id="cameraSelect" title="Camera"></select>
+    <button id="captureBtn" title="Take photo">📷 Capture</button>
+    <label class="iconbtn" for="fileInput" title="Upload image">📁</label>
+    <button id="restartBtn" title="Back to camera">↻</button>
+    <button id="dbgBtn" title="Show/hide log">🐞</button>
+    <input id="fileInput" type="file" accept="image/*" hidden>
+  </div>
+  <div id="status">Tap “Start camera”.</div>
+  <pre id="debug"></pre>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script type="module">
+  // zxing-wasm: the ZXing C++ engine compiled to WebAssembly — decodes PDF417 far more reliably
+  // than pure-JS @zxing/library, so AAMVA (US/Canada) and Colombian barcodes get read correctly.
+  try {
+    const m = await import('https://cdn.jsdelivr.net/npm/zxing-wasm@1.3.5/dist/es/reader/index.js');
+    m.setZXingModuleOverrides({
+      locateFile: (path, prefix) => path.endsWith('.wasm')
+        ? 'https://cdn.jsdelivr.net/npm/zxing-wasm@1.3.5/dist/reader/zxing_reader.wasm'
+        : prefix + path
+    });
+    // v1.3.5 has NO unified readBarcodes — it's readBarcodesFromImageData / readBarcodesFromImageFile.
+    window.__zxingReadBarcodes = m.readBarcodesFromImageData || m.readBarcodes;
+    window.dispatchEvent(new Event('zxingwasm-ready'));
+  } catch (e) { window.__zxingError = String(e); console.log('zxing-wasm load failed', e); }
+</script>
+<script>
+"use strict";
+
+const video        = document.getElementById('video');
+const banner       = document.getElementById('banner');
+const detail       = document.getElementById('detail');
+const statusEl     = document.getElementById('status');
+const cameraSelect = document.getElementById('cameraSelect');
+const startScreen  = document.getElementById('start');
+const startBtn     = document.getElementById('startBtn');
+const restartBtn   = document.getElementById('restartBtn');
+const captureBtn   = document.getElementById('captureBtn');
+const fileInput    = document.getElementById('fileInput');
+const photo        = document.getElementById('photo');
+const debugEl      = document.getElementById('debug');
+const dbgBtn       = document.getElementById('dbgBtn');
+const fieldsEl     = document.getElementById('fields');
+
+const VERSION = 'build 2026-06-16 · extract-v1 (field extraction · LOCAL)';
+window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm ready: ' + (window.__zxingReadBarcodes ? 'OK — strong PDF417 decoder active' : 'FUNCTION MISSING')));
+function dbg(msg) {
+  debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
+  debugEl.scrollTop = debugEl.scrollHeight;
+  try { console.log(msg); } catch (e) {}
+}
+function dbgClear() { debugEl.textContent = ''; }
+document.getElementById('ver').textContent = VERSION;
+debugEl.textContent = VERSION + ' — log ready. Debug stays visible, but OCR/barcode payloads are summarized.';
+
+let currentStream = null; // live camera MediaStream (preview only)
+let ocrWorker   = null;   // Tesseract
+let latinWorker = null;   // Tesseract eng, only for Colombian front-side label confirmation
+let ocrLang     = '';     // 'OCRB' (MRZ model) or 'eng' (fallback)
+let lastResultAt  = 0;
+let lastBarcodeAt = -99999;
+let mode = 'live';        // 'live' (camera) | 'image' (uploaded image)
+let ocrInitPromise = null;
+let latinInitPromise = null;
+const STICKY_MS = 1500;   // how long a result stays before reverting to "scanning"
+
+/* ───────────────────── Classification ───────────────────── */
+
+// AAMVA licenses carry a structured ANSI/IIN header; the Colombian ID card uses a proprietary
+// PDF417 payload without that AAMVA structure.
+function isAAMVA(text) {
+  return !!parseAAMVA(text);
+}
+
+function parseAAMVA(text) {
+  const s = String(text || '');
+  const header = s.match(/(?:^|@|[\x1e\r\n])ANSI[^\d]*(\d{6})/);
+  if (!header) return null;
+  const beginsWithComplianceIndicator = s.replace(/^[\s\x00-\x1f]+/, '').charCodeAt(0) === 64; // '@'
+  const hasDataElements = /(?:^|[\r\n])D[A-Z]{2}|DL(?:DAQ|DCS|DBA|DBB)|(?:DAQ|DCS|DBA|DBB)/.test(s);
+  if (!beginsWithComplianceIndicator && !hasDataElements) return null;
+  const iin = header[1];
+  return { iin, issuer: AAMVA_ISSUERS[iin] };
+}
+
+function payloadSummary(text) {
+  const s = String(text || '');
+  const controls = (s.match(/[\x00-\x1f]/g) || []).length;
+  const printable = s.replace(/[^\x20-\x7e]/g, '').length;
+  const aamva = parseAAMVA(s);
+  const tags = [];
+  if (aamva) tags.push('AAMVA IIN ' + aamva.iin);
+  else if (s.indexOf('ANSI') !== -1) tags.push('ANSI text without AAMVA structure');
+  if (looksLikeMRZ(s)) tags.push('MRZ-like');
+  return s.length + ' chars · ' + printable + ' printable · ' + controls + ' control' +
+         (tags.length ? ' · ' + tags.join(' · ') : '');
+}
+
+function dbgPayload(label, text) {
+  dbg(label + ': ' + payloadSummary(text));
+}
+
+/* ===== FIELD PARSERS (pure) ===== */
+const COUNTRY_NAMES = {
+  ESP:'Spain', USA:'United States', CAN:'Canada', MEX:'Mexico', COL:'Colombia',
+  GBR:'United Kingdom', FRA:'France', DEU:'Germany', ITA:'Italy', PRT:'Portugal',
+  NLD:'Netherlands', BEL:'Belgium', CHE:'Switzerland', IRL:'Ireland', POL:'Poland',
+  ROU:'Romania', BGR:'Bulgaria', MAR:'Morocco', DZA:'Algeria', BRA:'Brazil',
+  ARG:'Argentina', VEN:'Venezuela', PER:'Peru', ECU:'Ecuador', CHN:'China',
+  IND:'India', PAK:'Pakistan', RUS:'Russia', UKR:'Ukraine', SWE:'Sweden',
+  NOR:'Norway', DNK:'Denmark', FIN:'Finland', AUT:'Austria', GRC:'Greece',
+  TUR:'Turkey', JPN:'Japan', KOR:'South Korea', AUS:'Australia', NZL:'New Zealand'
+};
+function countryName(code) {
+  const c = String(code || '').toUpperCase().replace(/</g, '').trim();
+  if (!c) return '';
+  if (c === 'D') return 'Germany';                 // German MRZ uses 'D'
+  return COUNTRY_NAMES[c] || c;                     // fall back to the ISO-3 code
+}
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+// YYMMDD → DD/MM/YYYY. For a birth date, a 2-digit year in the future means 19xx.
+function fmtMrzDate(s, isBirth) {
+  const m = String(s || '').match(/(\d{2})(\d{2})(\d{2})/);
+  if (!m) return '';
+  const yy = +m[1], mm = +m[2], dd = +m[3];
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return '';
+  const nowYY = new Date().getFullYear() % 100;
+  const year = isBirth ? (yy > nowYY ? 1900 + yy : 2000 + yy) : 2000 + yy;
+  return pad2(dd) + '/' + pad2(mm) + '/' + year;
+}
+// AAMVA 8-digit date. US = MMDDCCYY, Canada = CCYYMMDD.
+function fmtAamvaDate(s, canada) {
+  const d = String(s || '').replace(/[^0-9]/g, '');
+  if (d.length !== 8) return '';
+  const y = canada ? d.substr(0, 4) : d.substr(4, 4);
+  const mm = canada ? d.substr(4, 2) : d.substr(0, 2);
+  const dd = canada ? d.substr(6, 2) : d.substr(2, 2);
+  if (+mm < 1 || +mm > 12 || +dd < 1 || +dd > 31) return '';
+  return dd + '/' + mm + '/' + y;
+}
+function sexLetter(s) { s = String(s || '').toUpperCase(); return (s === 'M' || s === 'F') ? s : ''; }
+function sexFromCode(s) { s = String(s || '').trim(); if (s === '1') return 'M'; if (s === '2') return 'F'; return sexLetter(s); }
+function mrzName(field) {
+  const parts = String(field || '').split('<<');
+  const surname = (parts[0] || '').replace(/</g, ' ').replace(/\s+/g, ' ').trim();
+  const given = parts.slice(1).join(' ').replace(/</g, ' ').replace(/\s+/g, ' ').trim();
+  return { surname, given };
+}
+function mrzFamily(len) {
+  if (len >= 28 && len <= 31) return 30;
+  if (len >= 34 && len <= 37) return 36;
+  if (len >= 40 && len <= 48) return 44;
+  return 0;
+}
+function emptyFields() {
+  return { country:'', dob:'', pob:'', issue:'', expiry:'', names:'', surname:'',
+           nationality:'', number:'', support:'', sex:'' };
+}
+function parseTD3(L, f) {
+  const a = L[0], b = L[1];
+  f.country = countryName(a.substr(2, 3));
+  const n = mrzName(a.substr(5)); f.surname = n.surname; f.names = n.given;
+  f.number = b.substr(0, 9).replace(/</g, '');
+  f.nationality = countryName(b.substr(10, 3));
+  f.dob = fmtMrzDate(b.substr(13, 6), true);
+  f.sex = sexLetter(b.substr(20, 1));
+  f.expiry = fmtMrzDate(b.substr(21, 6), false);
+}
+function parseTD2(L, f) {
+  const a = L[0], b = L[1];
+  f.country = countryName(a.substr(2, 3));
+  const n = mrzName(a.substr(5)); f.surname = n.surname; f.names = n.given;
+  f.number = b.substr(0, 9).replace(/</g, '');
+  f.nationality = countryName(b.substr(10, 3));
+  f.dob = fmtMrzDate(b.substr(13, 6), true);
+  f.sex = sexLetter(b.substr(20, 1));
+  f.expiry = fmtMrzDate(b.substr(21, 6), false);
+}
+function parseTD1(L, f) {
+  const a = L[0], b = L[1], c = L[2] || '';
+  f.country = countryName(a.substr(2, 3));
+  f.number = a.substr(5, 9).replace(/</g, '');
+  f.dob = fmtMrzDate(b.substr(0, 6), true);
+  f.sex = sexLetter(b.substr(7, 1));
+  f.expiry = fmtMrzDate(b.substr(8, 6), false);
+  f.nationality = countryName(b.substr(15, 3));
+  const n = mrzName(c); f.surname = n.surname; f.names = n.given;
+}
+function parseMRZ(text) {
+  const f = emptyFields();
+  const lines = String(text || '').toUpperCase().split(/\r?\n/)
+    .map(l => l.replace(/[^A-Z0-9<]/g, '')).filter(Boolean);
+  const byFam = { 30: [], 36: [], 44: [] };
+  for (const l of lines) { const fam = mrzFamily(l.length); if (fam) byFam[fam].push(l); }
+  if (byFam[44].length >= 2) parseTD3(byFam[44], f);
+  else if (byFam[36].length >= 2) parseTD2(byFam[36], f);
+  else if (byFam[30].length >= 2) parseTD1(byFam[30], f);
+  return f;
+}
+function parseAAMVAFields(text) {
+  const s = String(text || '');
+  const f = emptyFields();
+  const get = (code) => { const m = s.match(new RegExp(code + '([^\\r\\n]*)')); return m ? m[1].trim() : ''; };
+  const dcg = get('DCG').toUpperCase().replace(/[^A-Z]/g, '');
+  const canada = dcg === 'CAN' || dcg === 'CANADA';
+  f.country = dcg === 'USA' ? 'United States' : canada ? 'Canada' : dcg === 'MEX' ? 'Mexico' : dcg;
+  f.surname = get('DCS').replace(/,+$/, '').trim();
+  const first = get('DAC'), middle = get('DAD');
+  f.names = [first, middle].filter(Boolean).join(' ').replace(/,+$/, '').trim();
+  if (!f.surname && !f.names) {
+    const daa = get('DAA');
+    if (daa) { const p = daa.split(','); f.surname = (p[0] || '').trim(); f.names = p.slice(1).join(' ').trim(); }
+  }
+  f.number = get('DAQ');
+  f.dob = fmtAamvaDate(get('DBB'), canada);
+  f.expiry = fmtAamvaDate(get('DBA'), canada);
+  f.issue = fmtAamvaDate(get('DBD'), canada);
+  f.sex = sexFromCode(get('DBC'));
+  return f;
+}
+
+const FIELD_DEFS = [
+  ['Country', 'country'], ['Date of birth', 'dob'], ['Place of birth', 'pob'],
+  ['Date of issue', 'issue'], ['Expiration date', 'expiry'], ['Names', 'names'],
+  ['Surname', 'surname'], ['Nationality', 'nationality'], ['Number', 'number'],
+  ['Support number', 'support'], ['Sex', 'sex']
+];
+function renderFields(f) {
+  f = f || emptyFields();
+  fieldsEl.innerHTML = '';
+  for (const [label, key] of FIELD_DEFS) {
+    const row = document.createElement('div'); row.className = 'field-row';
+    const k = document.createElement('span'); k.className = 'field-k'; k.textContent = label + ':';
+    const v = document.createElement('span'); v.className = 'field-v'; v.textContent = f[key] || '';
+    row.appendChild(k); row.appendChild(v); fieldsEl.appendChild(row);
+  }
+  fieldsEl.style.display = 'block';
+}
+function hideFields() { fieldsEl.style.display = 'none'; fieldsEl.innerHTML = ''; }
+/* ===== END FIELD PARSERS ===== */
+
+// IIN (Issuer Identification Number) → [country, jurisdiction]. The 6 digits after "ANSI ".
+// Lets us tell USA apart from Canada. Source: AAMVA registry (c0shea/IdParser, py-aamva).
+const AAMVA_ISSUERS = {
+  // Canada
+  '604432':['CA','Alberta'], '990876':['CA','Alberta'],
+  '636028':['CA','British Columbia'], '636048':['CA','Manitoba'],
+  '636017':['CA','New Brunswick'], '636016':['CA','Newfoundland and Labrador'],
+  '636013':['CA','Nova Scotia'], '604433':['CA','Nunavut'], '636012':['CA','Ontario'],
+  '604426':['CA','Prince Edward Island'], '604428':['CA','Quebec'],
+  '636044':['CA','Saskatchewan'], '604429':['CA','Yukon'],
+  // Mexico
+  '636056':['MX','Coahuila'], '636057':['MX','Hidalgo'],
+  // USA (states and territories)
+  '636033':['US','Alabama'], '636059':['US','Alaska'], '636026':['US','Arizona'],
+  '636021':['US','Arkansas'], '636014':['US','California'], '636020':['US','Colorado'],
+  '636006':['US','Connecticut'], '636011':['US','Delaware'], '636043':['US','District of Columbia'],
+  '636010':['US','Florida'], '636055':['US','Georgia'], '636019':['US','Guam'],
+  '636047':['US','Hawaii'], '636050':['US','Idaho'], '636035':['US','Illinois'],
+  '636037':['US','Indiana'], '636018':['US','Iowa'], '636022':['US','Kansas'],
+  '636046':['US','Kentucky'], '636007':['US','Louisiana'], '636041':['US','Maine'],
+  '636003':['US','Maryland'], '636002':['US','Massachusetts'], '636032':['US','Michigan'],
+  '636038':['US','Minnesota'], '636051':['US','Mississippi'], '636030':['US','Missouri'],
+  '636008':['US','Montana'], '636054':['US','Nebraska'], '636049':['US','Nevada'],
+  '636039':['US','New Hampshire'], '636036':['US','New Jersey'], '636009':['US','New Mexico'],
+  '636001':['US','New York'], '636004':['US','North Carolina'], '636034':['US','North Dakota'],
+  '636023':['US','Ohio'], '636058':['US','Oklahoma'], '636029':['US','Oregon'],
+  '636025':['US','Pennsylvania'], '604431':['US','Puerto Rico'], '636052':['US','Rhode Island'],
+  '636005':['US','South Carolina'], '636042':['US','South Dakota'], '636053':['US','Tennessee'],
+  '636015':['US','Texas'], '636040':['US','Utah'], '636024':['US','Vermont'],
+  '636000':['US','Virginia'], '636045':['US','Washington'], '636061':['US','West Virginia'],
+  '636031':['US','Wisconsin'], '636060':['US','Wyoming'],
+  '636027':['US','U.S. State Department'], '636062':['US','U.S. Virgin Islands'],
+  '604427':['US','American Samoa'], '604430':['US','Northern Mariana Islands']
+};
+
+function handleBarcode(text) {
+  lastBarcodeAt = performance.now();
+  const aamva = parseAAMVA(text);
+  if (!aamva) {
+    // A PDF417 that is NOT AAMVA → Colombian ID card (Registraduría proprietary format).
+    setResult('colombia', 'BARCODE · Colombia', 'ID card (proprietary PDF417, non-AAMVA)');
+    renderFields(emptyFields());   // binary cédula payload is not parsed → fields stay empty
+    return;
+  }
+  const iin = aamva.iin;
+  const issuer = aamva.issuer;
+  if (issuer && issuer[0] === 'CA') {
+    setResult('canada', 'BARCODE · Canada', issuer[1] + ' · AAMVA license · IIN ' + iin);
+  } else if (issuer && issuer[0] === 'US') {
+    setResult('usa', 'BARCODE · USA', issuer[1] + ' · AAMVA license · IIN ' + iin);
+  } else if (issuer && issuer[0] === 'MX') {
+    setResult('mexico', 'BARCODE · Mexico', issuer[1] + ' · AAMVA license · IIN ' + iin);
+  } else {
+    // Valid AAMVA but an unregistered IIN: we don't guess the country.
+    setResult('aamva', 'BARCODE · AAMVA',
+              'AAMVA license · IIN ' + iin + ' (unrecognized jurisdiction)');
+  }
+  const ff = parseAAMVAFields(text);
+  if (!ff.country && issuer) ff.country = ({ US:'United States', CA:'Canada', MX:'Mexico' })[issuer[0]] || '';
+  renderFields(ff);
+}
+
+// Recognizes the MRZ shape: 2-3 official-length lines with chevron fillers.
+function looksLikeMRZ(text) {
+  const upper = (text || '').toUpperCase();
+  const cleanedLines = upper.split(/\r?\n/)
+    .map(line => line.replace(/[^A-Z0-9<]/g, ''))
+    .filter(Boolean);
+  const candidates = cleanedLines
+    .map(line => ({ line, family: mrzLineFamily(line.length) }))
+    .filter(item => item.family && item.line.indexOf('<') !== -1);
+  for (const family of [44, 36, 30]) {
+    const lines = candidates.filter(item => item.family === family).map(item => item.line);
+    if (lines.length < 2) continue;
+    const joined = lines.join('');
+    const chevrons = (joined.match(/</g) || []).length;
+    if (chevrons >= 5 && /<{2,}/.test(joined)) return true;
+  }
+  for (const line of cleanedLines) {
+    const chevrons = (line.match(/</g) || []).length;
+    if (line.length >= 16 && chevrons >= 5 && /<{2,}/.test(line) && /[A-Z0-9]{3}/.test(line)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function mrzLineFamily(length) {
+  if (length >= 28 && length <= 31) return 30; // TD1
+  if (length >= 34 && length <= 37) return 36; // TD2
+  if (length >= 40 && length <= 48) return 44; // TD3, allowing OCR to add a few stray chars
+  return 0;
+}
+
+function looksLikeColombianIdBarcodeBand(sw, sh, band) {
+  if (!band) return false;
+  const height = band.y1 - band.y0;
+  const midY = (band.y0 + band.y1) / 2;
+  return band.y0 >= sh * 0.45 &&
+         midY >= sh * 0.56 &&
+         height >= Math.max(12, sh * 0.035);
+}
+
+function colombianIdLabelScore(text) {
+  const t = String(text || '').toUpperCase().replace(/\s+/g, ' ');
+  const groups = [
+    ['FECHA', 'NACIMIENTO'],
+    ['LUGAR', 'NACIMIENTO'],
+    ['ESTATURA'],
+    ['SEXO'],
+    ['INDICE', 'DERECHO'],
+    ['REGISTRADOR'],
+    ['NACIONAL'],
+    ['G.S', 'RH']
+  ];
+  let score = 0;
+  for (const group of groups) {
+    if (group.every(token => t.indexOf(token) !== -1)) score++;
+  }
+  return score;
+}
+
+/* ───────────────────── UI ───────────────────── */
+
+function setResult(cls, text, sub) {
+  lastResultAt = performance.now();
+  banner.className = cls;
+  banner.textContent = text;
+  detail.textContent = sub || '';
+}
+
+function showFatal(msg) {
+  banner.className = 'error';
+  banner.textContent = 'Error';
+  detail.textContent = '';
+  statusEl.textContent = msg;
+}
+
+function handleUnreadableBarcode(sub, countryHint) {
+  lastBarcodeAt = performance.now();
+  if (countryHint === 'colombia') {
+    setResult('colombia', 'BARCODE · Colombia',
+              sub || 'Colombian ID-card PDF417 detected by shape; content could not be read');
+    return;
+  }
+  setResult('aamva', 'BARCODE (unreadable)',
+            sub || 'A barcode is present but its content could not be read — use a clearer / higher-resolution image');
+}
+
+// Revert to "scanning" after a while with no new detections.
+setInterval(() => {
+  if (mode === 'live' && performance.now() - lastResultAt > STICKY_MS && banner.className !== 'error') {
+    banner.className = 'scanning';
+    banner.textContent = 'Frame the document, then tap 📷';
+    detail.textContent = '';
+  }
+}, 300);
+
+/* ───────────────────── Barcode (ZXing / PDF417) ───────────────────── */
+
+const hints = new Map();
+hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.PDF_417]);
+hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+// Native BarcodeDetector (when available + supports PDF417). On Chrome/macOS & Android it's
+// backed by the OS and decodes dense/low-quality PDF417 far better than ZXing-js.
+let nativeDetector = null;
+(async () => {
+  try {
+    if ('BarcodeDetector' in window) {
+      const formats = await window.BarcodeDetector.getSupportedFormats();
+      dbg('BarcodeDetector formats: ' + (formats.join(', ') || '(none)'));
+      if (formats.includes('pdf417')) { nativeDetector = new window.BarcodeDetector({ formats: ['pdf417'] }); dbg('Native PDF417: ON'); }
+      else dbg('Native PDF417: not supported → ZXing only');
+    } else dbg('BarcodeDetector: unavailable → ZXing only');
+  } catch (e) { nativeDetector = null; dbg('BarcodeDetector error: ' + (e.message || e)); }
+})();
+
+// The camera is a PREVIEW only — no continuous scanning. The user frames the document and taps
+// 📷 Capture; the captured still then runs through the SAME pipeline as an uploaded image
+// (decodeBarcode → band check → MRZ OCR), which is far more reliable than per-frame live decoding.
+async function startPreview(deviceId) {
+  stopLive();
+  const base = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } };
+  // Ask for the highest resolution the device offers — a dense PDF417 / small MRZ needs the pixels.
+  const constraints = { audio: false, video: Object.assign(base, { width: { ideal: 3840 }, height: { ideal: 2160 } }) };
+  currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+  video.srcObject = currentStream;
+  try { await video.play(); } catch (e) {}
+  const s = currentStream.getVideoTracks()[0].getSettings();
+  dbg('Camera preview: ' + (s.width || '?') + '×' + (s.height || '?'));
+  mode = 'live';
+}
+
+function stopLive() {
+  if (currentStream) { currentStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} }); currentStream = null; }
+  video.srcObject = null;
+}
+
+// Render a source (image/video) to a canvas at targetW (allow up to 2× upscale).
+function toCanvas(source, sw, sh, targetW) {
+  const w = Math.min(targetW, Math.round(sw * 2));
+  const scale = w / sw;
+  const h = Math.round(sh * scale);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, 0, sw, sh, 0, 0, w, h);
+  return c;
+}
+
+function binarizeCanvas(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = id.data; let s = 0;
+  for (let i = 0; i < d.length; i += 4) { const g = d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114; d[i]=d[i+1]=d[i+2]=g; s+=g; }
+  const m = s / (canvas.width * canvas.height);
+  for (let i = 0; i < d.length; i += 4) { const v = d[i] < m ? 0 : 255; d[i]=d[i+1]=d[i+2]=v; }
+  ctx.putImageData(id, 0, 0);
+  return canvas;
+}
+
+async function wasmDecode(canvas) {
+  if (!window.__zxingReadBarcodes) return null;
+  try {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const res = await window.__zxingReadBarcodes(imgData, {
+      formats: ['PDF417'], tryHarder: true, tryRotate: true, tryInvert: true,
+      tryDownscale: true, maxNumberOfSymbols: 1
+    });
+    if (res && res.length && res[0].isValid !== false) {
+      let t = res[0].text;
+      // Colombian cédula PDF417 is binary → .text may be empty; rebuild from bytes so it's non-empty
+      // (and, having no "ANSI " header, gets classified as Colombia).
+      if (!t && res[0].bytes && res[0].bytes.length) {
+        t = Array.from(res[0].bytes).map(b => String.fromCharCode(b)).join('');
+      }
+      if (t) return t;
+    }
+  } catch (e) { dbg('wasm error: ' + (e.message || e)); }
+  return null;
+}
+
+async function nativeDecode(source) {
+  if (!nativeDetector) return null;
+  try { const codes = await nativeDetector.detect(source); if (codes && codes.length) return codes[0].rawValue; } catch (e) {}
+  return null;
+}
+
+async function zxingDecodeCanvas(canvas) {
+  try { const r = await new ZXing.BrowserMultiFormatReader(hints).decodeFromImageUrl(canvas.toDataURL()); if (r) return r.getText(); } catch (e) {}
+  return null;
+}
+
+// Decode a PDF417 from a canvas: wasm → native → ZXing, then a binarized retry. Returns text|null.
+async function decodeFromCanvas(canvas) {
+  let t = await wasmDecode(canvas);     if (t) return t;
+  t = await nativeDecode(canvas);       if (t) return t;
+  t = await zxingDecodeCanvas(canvas);  if (t) return t;
+  binarizeCanvas(canvas);
+  t = await wasmDecode(canvas);         if (t) return t;
+  t = await zxingDecodeCanvas(canvas);  if (t) return t;
+  return null;
+}
+
+// Decode a barcode from an image element (renders to a high-res canvas first).
+async function decodeBarcode(source, sw, sh) {
+  return decodeFromCanvas(toCanvas(source, sw, sh, Math.min(2000, sw)));
+}
+
+const BARCODE_BAND_PASSES = [
+  { delta: 26, minEdgesFrac: 0.10, minSideFrac: 0.025, minRunFactor: 0.05, minRunPx: 28 },
+  { delta: 18, minEdgesFrac: 0.07, minSideFrac: 0.015, minRunFactor: 0.04, minRunPx: 24 },
+  { delta: 12, minEdgesFrac: 0.05, minSideFrac: 0.010, minRunFactor: 0.04, minRunPx: 24 }
+];
+
+// Locate the densest contiguous band of high black/white-transition rows (the signature of a
+// 1D/PDF417 barcode, which plain text doesn't reach). Returns the band's y-range in SOURCE
+// coordinates, or null. Used both to retry decoding on a crop and as a presence signal.
+function findBarcodeBand(source, sw, sh) {
+  const W = 1000;                        // normalize resolution so thresholds are consistent
+  const scale = W / sw;
+  const H = Math.round(sh * scale);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, sw, sh, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  for (const pass of BARCODE_BAND_PASSES) {
+    const band = findBarcodeBandWithPass(d, W, H, scale, pass);
+    if (band) return band;
+  }
+  return null;
+}
+
+function findBarcodeBandWithPass(d, W, H, scale, pass) {
+  // Count intensity edges per row (illumination-independent). A barcode is a TALL, solid band of
+  // dense edges spread across the full width. An MRZ is only 2-3 THIN text lines with white gaps
+  // between them, so it never forms a tall contiguous high-edge band — that's how we tell them apart.
+  const minEdges = W * pass.minEdgesFrac;
+  const minSide = W * pass.minSideFrac;
+  const midL = W * 0.45, midR = W * 0.55;
+  let run = 0, bestRun = 0, bestEnd = -1;
+  for (let y = 0; y < H; y++) {
+    let edges = 0, eL = 0, eR = 0, prev = -1;
+    const base = y * W * 4;
+    for (let x = 0; x < W; x++) {
+      const i = base + x * 4;
+      const g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+      if (prev >= 0 && Math.abs(g - prev) > pass.delta) { edges++; if (x < midL) eL++; else if (x > midR) eR++; }
+      prev = g;
+    }
+    const dense = edges >= minEdges && eL >= minSide && eR >= minSide;
+    if (dense) { run++; if (run > bestRun) { bestRun = run; bestEnd = y; } }
+    else run = 0;
+  }
+  if (bestRun < Math.max(pass.minRunPx, H * pass.minRunFactor)) return null;   // require a TALL band
+  return { y0: Math.floor((bestEnd - bestRun + 1) / scale), y1: Math.ceil(bestEnd / scale) };
+}
+
+// Crop a horizontal band (with margin) and upscale it — a tight, large barcode decodes far better.
+function cropCanvas(source, sw, sh, y0, y1, targetW) {
+  const margin = Math.round((y1 - y0) * 0.3);
+  const cy0 = Math.max(0, y0 - margin);
+  const cy1 = Math.min(sh, y1 + margin);
+  const ch = cy1 - cy0;
+  const w = targetW || Math.min(2200, Math.round(sw * 1.6));
+  const scale = w / sw;
+  const h = Math.round(ch * scale);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, cy0, sw, ch, 0, 0, w, h);
+  return c;
+}
+
+// Decode a PDF417 from a (cropped) canvas — uses the unified wasm → native → ZXing pipeline.
+async function decodeCanvas(canvas) { return decodeFromCanvas(canvas); }
+
+/* ───────────────────── MRZ (Tesseract OCR) ───────────────────── */
+
+const work = document.createElement('canvas');
+const wctx = work.getContext('2d', { willReadFrequently: true });
+
+// Render a (optionally bottom-cropped) canvas for OCR. Higher targetW = legible MRZ; binarize
+// (Otsu) gives the MRZ model clean black/white text, which it reads far better.
+function ocrCanvas(source, sw, sh, targetW, cropTop, binarize) {
+  const cropY = Math.floor(sh * (cropTop || 0));
+  const cropH = sh - cropY;
+  const w = Math.min(targetW, Math.round(sw * 2));   // allow up to 2× upscale for tiny docs
+  const scale = w / sw;
+  const h = Math.round(cropH * scale);
+  work.width = w; work.height = h;
+  wctx.drawImage(source, 0, cropY, sw, cropH, 0, 0, w, h);
+  const id = wctx.getImageData(0, 0, w, h);
+  const d = id.data;
+  const hist = new Array(256).fill(0);
+  for (let i = 0; i < d.length; i += 4) {
+    const g = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0;
+    d[i] = d[i + 1] = d[i + 2] = g;
+    hist[g]++;
+  }
+  if (binarize) {                                   // Otsu threshold → clean black/white for OCR
+    const total = w * h;
+    let sumAll = 0; for (let t = 0; t < 256; t++) sumAll += t * hist[t];
+    let sumB = 0, wB = 0, maxVar = 0, thr = 127;
+    for (let t = 0; t < 256; t++) {
+      wB += hist[t]; if (!wB) continue;
+      const wF = total - wB; if (!wF) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB, mF = (sumAll - sumB) / wF;
+      const between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > maxVar) { maxVar = between; thr = t; }
+    }
+    for (let i = 0; i < d.length; i += 4) { const v = d[i] < thr ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = v; }
+  }
+  wctx.putImageData(id, 0, 0);
+  return work;
+}
+
+async function initOCR() {
+  statusEl.textContent = 'Loading MRZ engine…';
+	  // Full LSTM MRZ model trained on the OCR-B passport font (DoubangoTelecom). The stock 'eng'
+	  // model can't read the MRZ font. The file is plain (not gzipped) → gzip:false. Fall back to eng.
+	  try {
+	    ocrWorker = await Tesseract.createWorker('mrz', 1, {
+	      langPath: 'https://cdn.jsdelivr.net/gh/DoubangoTelecom/tesseractMRZ@1e7adfecda5f3c9ae1fb12cf6b4b8c3958c63e46/tessdata_fast',
+	      gzip: false
+	    });
+    ocrLang = 'mrz';
+  } catch (e) {
+    dbg('MRZ model load failed (' + (e && e.message ? e.message : e) + ') → falling back to eng');
+    ocrWorker = await Tesseract.createWorker('eng');
+    ocrLang = 'eng';
+  }
+  await ocrWorker.setParameters({ tessedit_pageseg_mode: '6' });   // no char whitelist (it can blank LSTM output)
+  dbg('OCR engine ready (' + ocrLang + ')');
+  statusEl.textContent = 'Ready. Point at the document.';
+}
+
+function ensureOCR() {                  // initialize the engine once; retry if it failed
+  if (!ocrInitPromise) {
+    ocrInitPromise = initOCR().catch((e) => {
+      ocrInitPromise = null;            // don't poison future attempts
+      dbg('OCR init error: ' + (e && e.message ? e.message : e));
+      throw e;
+    });
+  }
+  return ocrInitPromise;
+}
+
+async function initLatinOCR() {
+  latinWorker = await Tesseract.createWorker('eng');
+  await latinWorker.setParameters({ tessedit_pageseg_mode: '6' });
+  dbg('Layout OCR ready (eng)');
+}
+
+function ensureLatinOCR() {
+  if (!latinInitPromise) {
+    latinInitPromise = initLatinOCR().catch((e) => {
+      latinInitPromise = null;
+      dbg('Layout OCR init error: ' + (e && e.message ? e.message : e));
+      throw e;
+    });
+  }
+  return latinInitPromise;
+}
+
+function layoutCanvas(source, sw, sh, cropTop, cropBottom) {
+  const y0 = Math.floor(sh * cropTop);
+  const cropH = Math.max(1, Math.floor(sh * (cropBottom - cropTop)));
+  const w = Math.min(1800, Math.round(sw * 2));
+  const scale = w / sw;
+  const h = Math.round(cropH * scale);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, y0, sw, cropH, 0, 0, w, h);
+  return c;
+}
+
+async function confirmColombianIdLayout(source, sw, sh) {
+  try { await ensureLatinOCR(); } catch (e) { return false; }
+  if (!latinWorker) return false;
+  let bestScore = 0;
+  for (const crop of [[0, 0.58], [0.05, 0.58], [0.15, 0.58]]) {
+    try {
+      const { data } = await latinWorker.recognize(layoutCanvas(source, sw, sh, crop[0], crop[1]));
+      bestScore = Math.max(bestScore, colombianIdLabelScore(data.text));
+      if (bestScore >= 3) break;
+    } catch (e) { dbg('Layout OCR error: ' + (e.message || e)); }
+  }
+  dbg('Colombia layout score: ' + bestScore);
+  return bestScore >= 3;
+}
+
+// MRZ detection for an uploaded image: OCR at higher resolution, full frame then bottom crop.
+async function detectMRZ(source, sw, sh) {
+  try { await ensureOCR(); } catch (e) { dbg('OCR init FAILED: ' + (e.message || e)); return ''; }
+  if (!ocrWorker) { dbg('OCR worker not ready'); return ''; }
+  dbg('OCR engine: ' + ocrLang);
+  const targetW = Math.min(2400, Math.round(sw * 2));   // keep the small MRZ text legible
+  // The MRZ sits in the bottom strip — isolate it (tight crops) so it's large and not mixed with
+  // the rest of the document. Binarized so the MRZ model gets clean text.
+	  let allText = '';
+	  for (const cropTop of [0, 0.55, 0.74]) {
+	    try {
+	      const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, cropTop, true));
+	      dbgPayload('MRZ OCR top=' + cropTop, data.text || '');
+	      allText += '\n' + (data.text || '');
+	      if (looksLikeMRZ(data.text)) return data.text;
+    } catch (e) { dbg('OCR error (top=' + cropTop + '): ' + (e.message || e)); }
+  }
+  if (looksLikeMRZ(allText)) { dbg('MRZ matched on combined OCR text'); return allText; }
+  return '';
+}
+
+/* ───────────────────── Camera / startup ───────────────────── */
+
+async function listCameras(preferredId) {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const cams = devices.filter(d => d.kind === 'videoinput');
+  cameraSelect.innerHTML = '';
+  cams.forEach((c, i) => {
+    const opt = document.createElement('option');
+    opt.value = c.deviceId;
+    opt.textContent = c.label || ('Camera ' + (i + 1));
+    cameraSelect.appendChild(opt);
+  });
+  if (preferredId) cameraSelect.value = preferredId;
+}
+
+async function main() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showFatal('This browser does not support camera access.');
+    return;
+  }
+  const localhost = ['localhost', '127.0.0.1'].includes(location.hostname);
+  if (!window.isSecureContext && !localhost) {
+    showFatal('The camera needs https or localhost. Don\'t open the file by double-clicking (file://); serve it with a local server. See the README.');
+    return;
+  }
+  try {
+    // 1) Permission + rear camera by default (on mobile), at the highest available resolution.
+    await startPreview();
+    const preferred = currentStream.getVideoTracks()[0].getSettings().deviceId;
+    await listCameras(preferred);
+    // 2) Warm up the MRZ OCR engine so the capture analysis is fast.
+    ensureOCR();
+    setResult('scanning', 'Frame the document, then tap 📷', '');
+    statusEl.textContent = 'Frame the document inside the box and tap 📷 Capture.';
+  } catch (e) {
+    showFatal('Could not access the camera: ' + (e && e.message ? e.message : e));
+  }
+}
+
+/* ───────────────────── Uploaded image ───────────────────── */
+
+// Show a captured/uploaded still in place of the live video.
+function showCaptured(url) {
+  photo.src = url;
+  photo.style.display = 'block';
+  video.style.display = 'none';
+  document.getElementById('guide').style.display = 'none';
+}
+
+function finishAnalysis() {
+  statusEl.textContent = 'Done · tap 📷 to capture again or ↻ for the camera.';
+}
+
+// The ONE analysis pipeline, shared by captured photos and uploaded images. Barcode first
+// (full image → upscaled bottom strip → tight band crop); a barcode BAND present means it's a
+// barcode, never an MRZ, so we stop there; only with no band do we run MRZ OCR.
+async function analyzeSource(source, W, H) {
+  dbgClear(); dbg('Analyzing ' + W + '×' + H + '…');
+  hideFields();
+  setResult('scanning', 'Analyzing…', '');
+
+  // 1) Decode the barcode — full image, then the upscaled bottom strip (where it usually sits).
+  statusEl.textContent = 'Looking for a barcode…';
+  let text = await decodeBarcode(source, W, H);
+  if (!text) {
+    dbg('Full-image decode failed; trying upscaled bottom strip…');
+    text = await decodeCanvas(cropCanvas(source, W, H, Math.floor(H * 0.45), H, 2000));
+  }
+  if (text) { dbgPayload('Barcode decoded', text); handleBarcode(text); finishAnalysis(); return; }
+  dbg('No barcode decoded.');
+
+  // 2) A barcode BAND present means it's a barcode — NOT an MRZ (the band is found via strong-edge
+  //    density, which an MRZ's plain text never reaches). Try to decode a tight, upscaled crop;
+  //    otherwise report an unreadable barcode. Either way we do NOT fall through to MRZ — barcode
+  //    noise OCRs as '<'-laden garbage and would false-trigger MRZ.
+  const band = findBarcodeBand(source, W, H);
+  if (band) {
+    dbg('Barcode band at y≈' + band.y0 + '–' + band.y1 + ' → it is a barcode; retrying decode on crop…');
+    text = await decodeCanvas(cropCanvas(source, W, H, band.y0, band.y1));
+    if (text) { dbgPayload('Barcode decoded from crop', text); handleBarcode(text); finishAnalysis(); return; }
+    const colombiaShape = looksLikeColombianIdBarcodeBand(W, H, band);
+    const colombiaConfirmed = colombiaShape && await confirmColombianIdLayout(source, W, H);
+    dbg('→ Result: barcode present but unreadable' + (colombiaConfirmed ? ' · Colombian ID layout' : ''));
+    handleUnreadableBarcode(
+      colombiaConfirmed ? 'Colombian ID-card PDF417 detected by shape; content could not be read' : '',
+      colombiaConfirmed ? 'colombia' : ''
+    );
+    renderFields(emptyFields());
+    finishAnalysis(); return;
+  }
+  dbg('No barcode band found.');
+
+  // 3) No barcode at all → check for MRZ (now safe from barcode '<' noise)
+  statusEl.textContent = 'Looking for MRZ…';
+  const mrzText = await detectMRZ(source, W, H);
+  if (mrzText) { dbg('→ Result: MRZ'); setResult('mrz', 'MRZ', 'Machine-readable zone detected'); renderFields(parseMRZ(mrzText)); finishAnalysis(); return; }
+  dbg('→ MRZ pattern not matched.');
+
+  dbg('→ Result: Not detected');
+  setResult('notfound', 'Not detected', 'No barcode or MRZ found in the image');
+  renderFields(emptyFields());
+  finishAnalysis();
+}
+
+// Capture a still from the live camera and analyze it as an image. In image mode 📷 reframes
+// (returns to the live preview) so the user can capture again.
+async function capturePhoto() {
+  if (mode === 'image') { await backToLive(); return; }
+  if (!currentStream) return;
+  const track = currentStream.getVideoTracks()[0];
+  let source = null, W = 0, H = 0;
+  // Best quality: a full-resolution still via ImageCapture (Android Chrome), independent of the
+  // preview size. Falls back to the current preview frame (e.g. iOS Safari has no ImageCapture).
+  try {
+    if (window.ImageCapture && track && track.readyState === 'live') {
+      const blob = await new ImageCapture(track).takePhoto();
+      source = await createImageBitmap(blob);
+      W = source.width; H = source.height;
+      dbg('Captured via ImageCapture: ' + W + '×' + H);
+    }
+  } catch (e) { dbg('ImageCapture.takePhoto failed (' + (e && e.message ? e.message : e) + ') → using preview frame'); }
+  if (!source) {
+    W = video.videoWidth; H = video.videoHeight;
+    if (!W) { statusEl.textContent = 'Camera not ready yet — try again.'; return; }
+    source = video;
+    dbg('Captured preview frame: ' + W + '×' + H);
+  }
+  // Freeze the still on a canvas (used both for display and analysis), then release the camera.
+  const cap = document.createElement('canvas');
+  cap.width = W; cap.height = H;
+  cap.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, 0, W, H);
+  if (source.close) { try { source.close(); } catch (e) {} }
+  mode = 'image';
+  stopLive();
+  showCaptured(cap.toDataURL('image/jpeg', 0.92));
+  await analyzeSource(cap, W, H);
+}
+
+async function processImage(file) {
+  mode = 'image';
+  startScreen.style.display = 'none';
+  stopLive();
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = async () => {
+    showCaptured(url);
+    await analyzeSource(img, img.naturalWidth, img.naturalHeight);
+  };
+  img.onerror = () => showFatal('Could not load the image.');
+  img.src = url;
+}
+
+async function backToLive() {
+  photo.style.display = 'none';
+  if (photo.src) { try { URL.revokeObjectURL(photo.src); } catch (e) {} photo.removeAttribute('src'); }
+  video.style.display = 'block';
+  document.getElementById('guide').style.display = 'block';
+  hideFields();
+  setResult('scanning', 'Frame the document, then tap 📷', '');
+  try {
+    await startPreview(cameraSelect.value);
+    statusEl.textContent = 'Frame the document inside the box and tap 📷 Capture.';
+  } catch (e) { showFatal('Could not open the camera: ' + (e && e.message ? e.message : e)); }
+}
+
+/* ───────────────────── Events ───────────────────── */
+
+startBtn.addEventListener('click', () => { startScreen.style.display = 'none'; main(); });
+cameraSelect.addEventListener('change', () => { if (mode === 'live') startPreview(cameraSelect.value).catch((e) => showFatal('Camera error: ' + (e && e.message ? e.message : e))); });
+captureBtn.addEventListener('click', () => capturePhoto());
+restartBtn.addEventListener('click', () => backToLive());
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (file) processImage(file);
+  e.target.value = '';   // allow re-uploading the same file
+});
+dbgBtn.addEventListener('click', () => {
+  debugEl.style.display = (debugEl.style.display === 'none') ? '' : 'none';
+});
+</script>
+</body>
+</html>
