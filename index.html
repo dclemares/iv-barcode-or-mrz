@@ -130,7 +130,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v12 (OCR-B MRZ model)';
+const VERSION = 'build 2026-06-16 · v13 (full MRZ model, no whitelist)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm: ready (strong PDF417 decoder)'));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -456,22 +456,20 @@ function captureFrame() {
 
 async function initOCR() {
   statusEl.textContent = 'Loading MRZ engine…';
-  // Dedicated OCR-B model trained on MRZ — the stock 'eng' model can't read the MRZ font.
-  // Fall back to 'eng' if the model can't be fetched.
+  // Full LSTM MRZ model trained on the OCR-B passport font (DoubangoTelecom). The stock 'eng'
+  // model can't read the MRZ font. The file is plain (not gzipped) → gzip:false. Fall back to eng.
   try {
-    ocrWorker = await Tesseract.createWorker('OCRB', 1, {
-      langPath: 'https://cdn.jsdelivr.net/gh/DaanVanVugt/tesseract-mrz@master/lang'
+    ocrWorker = await Tesseract.createWorker('mrz', 1, {
+      langPath: 'https://cdn.jsdelivr.net/gh/DoubangoTelecom/tesseractMRZ@master/tessdata_fast',
+      gzip: false
     });
-    ocrLang = 'OCRB';
+    ocrLang = 'mrz';
   } catch (e) {
-    dbg('OCRB model load failed (' + (e && e.message ? e.message : e) + ') → falling back to eng');
+    dbg('MRZ model load failed (' + (e && e.message ? e.message : e) + ') → falling back to eng');
     ocrWorker = await Tesseract.createWorker('eng');
     ocrLang = 'eng';
   }
-  await ocrWorker.setParameters({
-    tessedit_pageseg_mode: '6',   // uniform block of text
-    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'
-  });
+  await ocrWorker.setParameters({ tessedit_pageseg_mode: '6' });   // no char whitelist (it can blank LSTM output)
   dbg('OCR engine ready (' + ocrLang + ')');
   statusEl.textContent = 'Ready. Point at the document.';
 }
@@ -491,8 +489,9 @@ function ensureOCR() {                  // initialize the engine once; retry if 
 async function detectMRZ(source, sw, sh) {
   try { await ensureOCR(); } catch (e) { dbg('OCR init FAILED: ' + (e.message || e)); return false; }
   if (!ocrWorker) { dbg('OCR worker not ready'); return false; }
+  dbg('OCR engine: ' + ocrLang);
   const targetW = Math.min(2200, Math.round(sw * 2));   // keep the small MRZ text legible
-  for (const cropTop of [0, 0.5, 0.72]) {   // whole frame, then progressively tighter to the MRZ
+  for (const cropTop of [0, 0.45]) {   // whole frame, then the bottom half (keeps a text block for PSM)
     try {
       const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, cropTop));
       dbg('[MRZ OCR · top=' + cropTop + ']\n' + (data.text || '(empty)').trim());
