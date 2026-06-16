@@ -133,7 +133,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v28 (MRZ vs barcode: concentrated chevrons)';
+const VERSION = 'build 2026-06-16 · v29 (MRZ confirmed by check digits)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm ready: ' + (window.__zxingReadBarcodes ? 'OK — strong PDF417 decoder active' : 'FUNCTION MISSING')));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -295,6 +295,72 @@ function mrzShapeDebug(text) {
   if (!lines.length) return '(no A-Z0-9< lines >=10)';
   return lines.map(l => l.length + 'ch/' + (l.match(/</g) || []).length + '</f' + mrzLineFamily(l.length)).join('  ');
 }
+
+/* ===== MRZ VALIDATION (pure) ===== */
+// Confirm an MRZ by its ICAO check digits instead of guessing from chevron/line shape. A real MRZ
+// satisfies them; barcode-OCR noise / ordinary text effectively never satisfies two independent
+// ones. This both classifies (it IS an MRZ) and yields the parsed fields.
+function mrzVal(c) {
+  if (c >= '0' && c <= '9') return c.charCodeAt(0) - 48;
+  if (c >= 'A' && c <= 'Z') return c.charCodeAt(0) - 55; // A=10 … Z=35
+  return 0;                                              // '<' filler / anything else
+}
+function mrzCheck(s) {
+  const w = [7, 3, 1];
+  let sum = 0;
+  for (let i = 0; i < s.length; i++) sum += mrzVal(s[i]) * w[i % 3];
+  return sum % 10;
+}
+function digitOk(field, d) { return /^[0-9]$/.test(d) && mrzCheck(field) === +d; }
+function plausibleDate(s) {
+  if (!/^[0-9]{6}$/.test(s)) return false;
+  const mm = +s.slice(2, 4), dd = +s.slice(4, 6);
+  return mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31;
+}
+// TD3/TD2 line 2: docNum(0-8) chk(9) nat(10-12) dob(13-18) chk(19) sex(20) exp(21-26) chk(27).
+// Offset search tolerates leading OCR junk / length drift; needs >=2 passing checks (dates gated on
+// a plausible YYMMDD) so noise can't slip through.
+function tryLine2(L) {
+  let best = null;
+  for (let off = 0; off + 28 <= L.length; off++) {
+    const s = L.slice(off);
+    const dob = s.slice(13, 19), exp = s.slice(21, 27);
+    let passes = 0;
+    if (digitOk(s.slice(0, 9), s[9])) passes++;
+    if (plausibleDate(dob) && digitOk(dob, s[19])) passes++;
+    if (plausibleDate(exp) && digitOk(exp, s[27])) passes++;
+    if (passes >= 2 && (!best || passes > best.passes)) {
+      best = { passes, fields: { number: s.slice(0, 9).replace(/</g, ''), nationality: s.slice(10, 13), dob, sex: s[20], expiry: exp } };
+    }
+  }
+  return best;
+}
+// TD1 line 2: dob(0-5) chk(6) sex(7) exp(8-13) chk(14) nat(15-17).
+function tryTD1(lines) {
+  for (const L of lines) {
+    for (let off = 0; off + 15 <= L.length; off++) {
+      const s = L.slice(off);
+      const dob = s.slice(0, 6), exp = s.slice(8, 14);
+      let passes = 0;
+      if (plausibleDate(dob) && digitOk(dob, s[6])) passes++;
+      if (plausibleDate(exp) && digitOk(exp, s[14])) passes++;
+      if (passes >= 2) return { passes, fields: { dob, sex: s[7], expiry: exp, nationality: s.slice(15, 18) } };
+    }
+  }
+  return null;
+}
+function validateMRZ(text) {
+  const lines = String(text || '').toUpperCase().split(/\r?\n/)
+    .map(l => l.replace(/[^A-Z0-9<]/g, '')).filter(l => l.length >= 15);
+  for (const L of lines) {
+    const r = tryLine2(L);
+    if (r) return { valid: true, format: 'TD2/TD3', checks: r.passes, fields: r.fields };
+  }
+  const t1 = tryTD1(lines);
+  if (t1) return { valid: true, format: 'TD1', checks: t1.passes, fields: t1.fields };
+  return { valid: false, format: null, checks: 0, fields: null };
+}
+/* ===== END MRZ VALIDATION ===== */
 
 function looksLikeColombianIdBarcodeBand(sw, sh, band) {
   if (!band) return false;
@@ -665,16 +731,19 @@ async function detectMRZ(source, sw, sh) {
   // The MRZ sits in the bottom strip — isolate it (tight crops) so it's large and not mixed with
   // the rest of the document. Binarized so the MRZ model gets clean text.
 	  let allText = '';
-	  for (const cropTop of [0, 0.55, 0.74]) {
+	  for (const cropTop of [0, 0.5, 0.62, 0.74, 0.82]) {
 	    try {
 	      const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, cropTop, true));
 	      dbgPayload('MRZ OCR top=' + cropTop, data.text || '');
       dbg('MRZ shape top=' + cropTop + ': ' + mrzShapeDebug(data.text || ''));
 	      allText += '\n' + (data.text || '');
-	      if (looksLikeMRZ(data.text)) return true;
+	      const v = validateMRZ(data.text || '');
+      if (v.valid) { dbg('MRZ check digits OK (' + v.format + ', ' + v.checks + ' checks)'); return true; }
     } catch (e) { dbg('OCR error (top=' + cropTop + '): ' + (e.message || e)); }
   }
-  if (looksLikeMRZ(allText)) { dbg('MRZ matched on combined OCR text'); return true; }
+  const vc = validateMRZ(allText);
+  if (vc.valid) { dbg('MRZ check digits OK on combined (' + vc.checks + ' checks)'); return true; }
+  dbg('No valid MRZ check digits — not an MRZ.');
   return false;
 }
 

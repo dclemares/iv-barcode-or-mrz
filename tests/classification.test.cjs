@@ -31,6 +31,58 @@ function loadClassifier() {
   return Function(code)();
 }
 
+function loadMrzValidator() {
+  const a = html.indexOf('/* ===== MRZ VALIDATION (pure) ===== */');
+  const b = html.indexOf('/* ===== END MRZ VALIDATION ===== */');
+  assert.notEqual(a, -1, 'MRZ validation fence start missing');
+  assert.notEqual(b, -1, 'MRZ validation fence end missing');
+  const code = html.slice(a, b) + '\nreturn { validateMRZ, mrzCheck, digitOk };';
+  return Function(code)();
+}
+
+test('mrzCheck computes ICAO 7-3-1 check digits', () => {
+  const { mrzCheck } = loadMrzValidator();
+  assert.equal(mrzCheck('L898902C3'), 6);   // document number
+  assert.equal(mrzCheck('740812'), 2);      // date of birth
+  assert.equal(mrzCheck('120415'), 9);      // expiry
+});
+
+test('validateMRZ confirms a real TD3 passport by its check digits', () => {
+  const { validateMRZ } = loadMrzValidator();
+  const r = validateMRZ(
+    'P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<\n' +
+    'L898902C36UTO7408122F1204159ZE184226B<<<<<10'
+  );
+  assert.equal(r.valid, true);
+  assert.equal(r.fields.number, 'L898902C3');
+  assert.equal(r.fields.dob, '740812');
+  assert.equal(r.fields.expiry, '120415');
+});
+
+test('validateMRZ confirms a TD1 residence permit (checks split across lines)', () => {
+  const { validateMRZ } = loadMrzValidator();
+  // Italian permit MRZ (TD1): dob 650607 chk 6, expiry 300607 chk 0 → both validate.
+  const r = validateMRZ(
+    'C<ITACA22014GD0<<<<<<<<<<<<<<<\n' +
+    '6506076M3006070ITA<<<<<<<<<<<8\n' +
+    'PREO<<MIRCO<PARIDE<<<<<<<<<<<<'
+  );
+  assert.equal(r.valid, true);
+});
+
+test('validateMRZ tolerates leading OCR junk via offset search', () => {
+  const { validateMRZ } = loadMrzValidator();
+  const r = validateMRZ('SOME GARBAGE\nQWL898902C36UTO7408122F1204159ZE184226B<<<<<10');
+  assert.equal(r.valid, true);
+});
+
+test('validateMRZ rejects barcode-OCR noise and ordinary text', () => {
+  const { validateMRZ } = loadMrzValidator();
+  assert.equal(validateMRZ('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nBBBB12345678CCCCCC<<DDDDDDDD').valid, false);
+  assert.equal(validateMRZ('CLASS RESTRICTIONS CONDITIONS NONE TEXAS ROADSIDE ASSISTANCE').valid, false);
+  assert.equal(validateMRZ('').valid, false);
+});
+
 test('AAMVA classification requires a structured ANSI/IIN payload', () => {
   const classifier = loadClassifier();
   const classify = (text) => {
