@@ -130,7 +130,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v11 (tolerant MRZ + tight crops)';
+const VERSION = 'build 2026-06-16 · v12 (OCR-B MRZ model)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm: ready (strong PDF417 decoder)'));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -143,6 +143,7 @@ debugEl.textContent = VERSION + ' — log ready. Upload an image to see what the
 
 let codeReader  = null;   // ZXing
 let ocrWorker   = null;   // Tesseract
+let ocrLang     = '';     // 'OCRB' (MRZ model) or 'eng' (fallback)
 let ocrBusy     = false;
 let lastResultAt  = 0;
 let lastBarcodeAt = -99999;
@@ -455,11 +456,23 @@ function captureFrame() {
 
 async function initOCR() {
   statusEl.textContent = 'Loading MRZ engine…';
-  ocrWorker = await Tesseract.createWorker('eng');
+  // Dedicated OCR-B model trained on MRZ — the stock 'eng' model can't read the MRZ font.
+  // Fall back to 'eng' if the model can't be fetched.
+  try {
+    ocrWorker = await Tesseract.createWorker('OCRB', 1, {
+      langPath: 'https://cdn.jsdelivr.net/gh/DaanVanVugt/tesseract-mrz@master/lang'
+    });
+    ocrLang = 'OCRB';
+  } catch (e) {
+    dbg('OCRB model load failed (' + (e && e.message ? e.message : e) + ') → falling back to eng');
+    ocrWorker = await Tesseract.createWorker('eng');
+    ocrLang = 'eng';
+  }
   await ocrWorker.setParameters({
-    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
-    tessedit_pageseg_mode: '6'   // uniform block of text
+    tessedit_pageseg_mode: '6',   // uniform block of text
+    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'
   });
+  dbg('OCR engine ready (' + ocrLang + ')');
   statusEl.textContent = 'Ready. Point at the document.';
 }
 
@@ -478,7 +491,7 @@ function ensureOCR() {                  // initialize the engine once; retry if 
 async function detectMRZ(source, sw, sh) {
   try { await ensureOCR(); } catch (e) { dbg('OCR init FAILED: ' + (e.message || e)); return false; }
   if (!ocrWorker) { dbg('OCR worker not ready'); return false; }
-  const targetW = Math.min(1700, Math.round(sw * 1.5));
+  const targetW = Math.min(2200, Math.round(sw * 2));   // keep the small MRZ text legible
   for (const cropTop of [0, 0.5, 0.72]) {   // whole frame, then progressively tighter to the MRZ
     try {
       const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, cropTop));
