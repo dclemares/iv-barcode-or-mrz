@@ -131,7 +131,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v22 (verified Colombia fallback)';
+const VERSION = 'build 2026-06-16 · v23 (live-path diagnostics)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm ready: ' + (window.__zxingReadBarcodes ? 'OK — strong PDF417 decoder active' : 'FUNCTION MISSING')));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -368,30 +368,35 @@ async function startScanner(deviceId) {
   if (codeReader) { try { codeReader.reset(); } catch (e) {} }
   codeReader = new ZXing.BrowserMultiFormatReader(hints, 150);
   await codeReader.decodeFromVideoDevice(deviceId || undefined, video, (result) => {
-    if (result) handleBarcode(result.getText());
+    if (result) { dbgPayload('Live ZXing(stream) decoded', result.getText()); handleBarcode(result.getText()); }
   });
 }
 
 // Live: besides ZXing's continuous scan, poll the stronger decoders (wasm + native) on the
 // current frame — they catch PDF417 (incl. AAMVA) that pure-JS ZXing misses live.
 let liveBusy = false;
+let lastLoggedW = 0;
 async function liveTick() {
   if (mode !== 'live' || liveBusy || !video.videoWidth) return;
   if (performance.now() - lastBarcodeAt < 1200) return;
   liveBusy = true;
   try {
     const W = video.videoWidth, H = video.videoHeight;
+    if (W !== lastLoggedW) { dbg('Live camera resolution: ' + W + '×' + H); lastLoggedW = W; }
     const canvas = toCanvas(video, W, H, Math.min(1280, W));
     let t = await wasmDecode(canvas);
-    if (!t) t = await nativeDecode(video);
+    if (t) dbgPayload('Live wasm decoded', t);
+    if (!t) { t = await nativeDecode(video); if (t) dbgPayload('Live native decoded', t); }
     if (t) { handleBarcode(t); return; }
     const band = findBarcodeBand(video, W, H);
     if (band) {
+      dbg('Live barcode band at y≈' + band.y0 + '–' + band.y1 + ' (frame ' + W + '×' + H + ')');
       t = await decodeCanvas(cropCanvas(video, W, H, band.y0, band.y1, Math.min(1600, Math.round(W * 1.5))));
-      if (t) handleBarcode(t);
+      if (t) { dbgPayload('Live crop decoded', t); handleBarcode(t); }
       else {
         const colombiaShape = looksLikeColombianIdBarcodeBand(W, H, band);
         const colombiaConfirmed = colombiaShape && await confirmColombianIdLayout(video, W, H);
+        dbg('Live band undecodable → ' + (colombiaConfirmed ? 'BARCODE · Colombia (layout confirmed)' : 'BARCODE (unreadable)'));
         handleUnreadableBarcode(
           colombiaConfirmed
             ? 'Colombian ID-card PDF417 detected by shape; move closer for content decoding'
@@ -696,6 +701,7 @@ async function ocrTick() {
   try {
     const { data } = await ocrWorker.recognize(canvas);
     if (looksLikeMRZ(data.text) && performance.now() - lastBarcodeAt > 1000) {
+      dbg('Live OCR → MRZ shape matched (no recent barcode)');
       setResult('mrz', 'MRZ', 'Machine-readable zone detected');
     }
   } catch (e) { /* ignore occasional OCR failures */ }
