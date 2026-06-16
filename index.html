@@ -116,7 +116,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v7 (revert dawg regression)';
+const VERSION = 'build 2026-06-16 · v8 (locate+crop barcode)';
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
   debugEl.scrollTop = debugEl.scrollHeight;
@@ -338,11 +338,11 @@ async function decodeBarcode(source, sw, sh) {
   return null;
 }
 
-// Heuristic "is a barcode visibly present?" — last resort when nothing decoded and there's no MRZ.
-// Looks for a contiguous band of rows with very high black/white transition density (the signature
-// of a 1D/PDF417 barcode), which plain printed text doesn't reach.
-function detectBarcodeBand(source, sw, sh) {
-  const W = Math.min(900, sw);
+// Locate the densest contiguous band of high black/white-transition rows (the signature of a
+// 1D/PDF417 barcode, which plain text doesn't reach). Returns the band's y-range in SOURCE
+// coordinates, or null. Used both to retry decoding on a crop and as a presence signal.
+function findBarcodeBand(source, sw, sh) {
+  const W = Math.min(1400, sw);          // less downscaling → thin bars stay separate
   const scale = W / sw;
   const H = Math.round(sh * scale);
   const c = document.createElement('canvas');
@@ -357,18 +357,55 @@ function detectBarcodeBand(source, sw, sh) {
     gray[q] = g; sum += g;
   }
   const thresh = sum / (W * H);
-  const minTransitions = W * 0.18;
-  let run = 0, maxRun = 0;
+  const minTr = W * 0.11;
+  let run = 0, bestRun = 0, bestEnd = -1;
   for (let y = 0; y < H; y++) {
     let tr = 0, prev = gray[y * W] < thresh ? 0 : 1;
     for (let x = 1; x < W; x++) {
       const cur = gray[y * W + x] < thresh ? 0 : 1;
       if (cur !== prev) { tr++; prev = cur; }
     }
-    if (tr >= minTransitions) { run++; if (run > maxRun) maxRun = run; }
+    if (tr >= minTr) { run++; if (run > bestRun) { bestRun = run; bestEnd = y; } }
     else run = 0;
   }
-  return maxRun >= Math.max(8, H * 0.03);
+  if (bestRun < Math.max(12, H * 0.025)) return null;
+  return { y0: Math.floor((bestEnd - bestRun + 1) / scale), y1: Math.ceil(bestEnd / scale) };
+}
+
+// Crop a horizontal band (with margin) and upscale it — a tight, large barcode decodes far better.
+function cropCanvas(source, sw, sh, y0, y1, targetW) {
+  const margin = Math.round((y1 - y0) * 0.3);
+  const cy0 = Math.max(0, y0 - margin);
+  const cy1 = Math.min(sh, y1 + margin);
+  const ch = cy1 - cy0;
+  const w = targetW || Math.min(2200, Math.round(sw * 1.6));
+  const scale = w / sw;
+  const h = Math.round(ch * scale);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, cy0, sw, ch, 0, 0, w, h);
+  return c;
+}
+
+// Decode a PDF417 from a canvas: native detector first, then ZXing (+ binarized variant).
+async function decodeCanvas(canvas) {
+  if (nativeDetector) {
+    try { const codes = await nativeDetector.detect(canvas); if (codes && codes.length) return codes[0].rawValue; } catch (e) {}
+  }
+  const reader = new ZXing.BrowserMultiFormatReader(hints);
+  try { const r = await reader.decodeFromImageUrl(canvas.toDataURL()); if (r) return r.getText(); } catch (e) {}
+  // binarized retry
+  try {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = id.data; let s = 0;
+    for (let i = 0; i < d.length; i += 4) { const g = d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114; d[i]=d[i+1]=d[i+2]=g; s+=g; }
+    const m = s / (canvas.width * canvas.height);
+    for (let i = 0; i < d.length; i += 4) { const v = d[i] < m ? 0 : 255; d[i]=d[i+1]=d[i+2]=v; }
+    ctx.putImageData(id, 0, 0);
+    const r = await reader.decodeFromImageUrl(canvas.toDataURL()); if (r) return r.getText();
+  } catch (e) {}
+  return null;
 }
 
 /* ───────────────────── MRZ (Tesseract OCR) ───────────────────── */
@@ -512,25 +549,31 @@ async function processImage(file) {
     dbgClear(); dbg('Image ' + W + '×' + H + ' — analyzing…');
     setResult('scanning', 'Analyzing…', '');
 
-    // 1) Barcode decode (native → ZXing → preprocessed variants)
+    // 1) Barcode decode on the whole image (native → ZXing → preprocessed variants)
     statusEl.textContent = 'Looking for a barcode…';
-    const text = await decodeBarcode(img, W, H);
-    if (text) {
-      dbg('Barcode DECODED: ' + text.replace(/[\r\n]+/g, ' ').slice(0, 60) + '…');
-      handleBarcode(text); done(); return;
-    }
-    dbg('No barcode decoded.');
+    let text = await decodeBarcode(img, W, H);
+    if (text) { dbg('Barcode DECODED: ' + text.replace(/[\r\n]+/g, ' ').slice(0, 60) + '…'); handleBarcode(text); done(); return; }
+    dbg('No barcode decoded on full image.');
 
-    // 2) MRZ
+    // 2) Locate the barcode band and retry decoding on a tight, upscaled crop (big improvement)
+    const band = findBarcodeBand(img, W, H);
+    if (band) {
+      dbg('Barcode band at y≈' + band.y0 + '–' + band.y1 + ' → retrying on crop…');
+      text = await decodeCanvas(cropCanvas(img, W, H, band.y0, band.y1));
+      if (text) { dbg('DECODED from crop: ' + text.replace(/[\r\n]+/g, ' ').slice(0, 60) + '…'); handleBarcode(text); done(); return; }
+    } else {
+      dbg('No barcode band found.');
+    }
+
+    // 3) MRZ
     statusEl.textContent = 'Looking for MRZ…';
     if (await detectMRZ(img, W, H)) { dbg('→ Result: MRZ'); setResult('mrz', 'MRZ', 'Machine-readable zone detected'); done(); return; }
     dbg('→ MRZ pattern not matched.');
 
-    // 3) A barcode is clearly present but couldn't be decoded, and there's no MRZ → likely Colombia
-    if (detectBarcodeBand(img, W, H)) {
-      dbg('→ Result: barcode band present (Colombia?)');
-      setResult('colombia', 'BARCODE · Colombia?',
-                'PDF417 detected but not decoded — likely a Colombian ID card');
+    // 4) A barcode is clearly present but couldn't be decoded, and there's no MRZ → likely Colombia
+    if (band) {
+      dbg('→ Result: barcode present but undecoded (Colombia?)');
+      setResult('colombia', 'BARCODE · Colombia?', 'PDF417 detected but not decoded — likely a Colombian ID card');
       done(); return;
     }
 
