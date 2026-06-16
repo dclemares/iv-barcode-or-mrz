@@ -141,7 +141,7 @@ const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 const fieldsEl     = document.getElementById('fields');
 
-const VERSION = 'build 2026-06-16 · extract-v1 (field extraction · LOCAL)';
+const VERSION = 'build 2026-06-16 · extract-v2 (field extraction · LOCAL; MRZ band fix)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm ready: ' + (window.__zxingReadBarcodes ? 'OK — strong PDF417 decoder active' : 'FUNCTION MISSING')));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -884,15 +884,18 @@ async function analyzeSource(source, W, H) {
   if (text) { dbgPayload('Barcode decoded', text); handleBarcode(text); finishAnalysis(); return; }
   dbg('No barcode decoded.');
 
-  // 2) A barcode BAND present means it's a barcode — NOT an MRZ (the band is found via strong-edge
-  //    density, which an MRZ's plain text never reaches). Try to decode a tight, upscaled crop;
-  //    otherwise report an unreadable barcode. Either way we do NOT fall through to MRZ — barcode
-  //    noise OCRs as '<'-laden garbage and would false-trigger MRZ.
+  // 2) A barcode band may be a PDF417 — try to decode the crop. If it decodes, it's a barcode.
+  //    If it does NOT, the band may actually be a document's MRZ (dense, full-width OCR-B text
+  //    forms the same kind of high-edge band), so try MRZ before declaring an unreadable barcode.
   const band = findBarcodeBand(source, W, H);
   if (band) {
-    dbg('Barcode band at y≈' + band.y0 + '–' + band.y1 + ' → it is a barcode; retrying decode on crop…');
+    dbg('Barcode band at y≈' + band.y0 + '–' + band.y1 + ' → trying to decode the crop…');
     text = await decodeCanvas(cropCanvas(source, W, H, band.y0, band.y1));
     if (text) { dbgPayload('Barcode decoded from crop', text); handleBarcode(text); finishAnalysis(); return; }
+    dbg('Band did not decode as a barcode; checking whether it is an MRZ…');
+    statusEl.textContent = 'Looking for MRZ…';
+    const bandMrz = await detectMRZ(source, W, H);
+    if (bandMrz) { dbg('→ Result: MRZ (the band was the MRZ, not a barcode)'); setResult('mrz', 'MRZ', 'Machine-readable zone detected'); renderFields(parseMRZ(bandMrz)); finishAnalysis(); return; }
     const colombiaShape = looksLikeColombianIdBarcodeBand(W, H, band);
     const colombiaConfirmed = colombiaShape && await confirmColombianIdLayout(source, W, H);
     dbg('→ Result: barcode present but unreadable' + (colombiaConfirmed ? ' · Colombian ID layout' : ''));

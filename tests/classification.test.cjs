@@ -117,6 +117,21 @@ test('photo analysis checks for a barcode band before OCR can classify MRZ', () 
   assert.match(html, /function handleUnreadableBarcode/);
 });
 
+test('an undecodable barcode band falls through to MRZ before declaring it unreadable', () => {
+  const start = html.indexOf('async function analyzeSource');
+  const end = html.indexOf('async function capturePhoto', start);
+  assert.notEqual(start, -1, 'Missing analyzeSource');
+  assert.notEqual(end, -1, 'Missing analyzeSource end marker');
+  const analyze = html.slice(start, end);
+  // A document MRZ (dense, full-width OCR-B text) also forms a high-edge band, so an undecodable
+  // band may be an MRZ — detectMRZ must be tried before handleUnreadableBarcode.
+  const mrzIdx = analyze.indexOf('detectMRZ');
+  const unreadableIdx = analyze.indexOf('handleUnreadableBarcode');
+  assert.notEqual(mrzIdx, -1, 'analyzeSource should call detectMRZ');
+  assert.notEqual(unreadableIdx, -1, 'analyzeSource should call handleUnreadableBarcode');
+  assert.ok(mrzIdx < unreadableIdx, 'detectMRZ must be attempted before declaring an unreadable barcode');
+});
+
 test('the camera is preview-only — no continuous live scanning loops', () => {
   assert.doesNotMatch(html, /setInterval\(liveTick/);
   assert.doesNotMatch(html, /setInterval\(ocrTick/);
