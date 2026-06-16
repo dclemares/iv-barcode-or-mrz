@@ -130,7 +130,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v16 (barcode band wins over MRZ)';
+const VERSION = 'build 2026-06-16 · v17 (decode bottom strip + robust band)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm: ready (strong PDF417 decoder)'));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -372,7 +372,7 @@ async function decodeBarcode(source, sw, sh) {
 // 1D/PDF417 barcode, which plain text doesn't reach). Returns the band's y-range in SOURCE
 // coordinates, or null. Used both to retry decoding on a crop and as a presence signal.
 function findBarcodeBand(source, sw, sh) {
-  const W = Math.min(1400, sw);          // less downscaling → thin bars stay separate
+  const W = 1000;                        // normalize resolution so thresholds are consistent
   const scale = W / sw;
   const H = Math.round(sh * scale);
   const c = document.createElement('canvas');
@@ -380,12 +380,12 @@ function findBarcodeBand(source, sw, sh) {
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(source, 0, 0, sw, sh, 0, 0, W, H);
   const d = ctx.getImageData(0, 0, W, H).data;
-  // Count STRONG intensity edges per row (illumination-independent — no global threshold, which
-  // failed on the cédula's bright background). A barcode row has many sharp black/white edges
-  // spread across the FULL width — unlike a fingerprint (corner blob) or a single text line.
-  const DELTA = 38;
-  const minEdges = W * 0.11;
-  const minSide = W * 0.03;
+  // Count intensity edges per row (illumination-independent). A barcode is a TALL, solid band of
+  // dense edges spread across the full width. An MRZ is only 2-3 THIN text lines with white gaps
+  // between them, so it never forms a tall contiguous high-edge band — that's how we tell them apart.
+  const DELTA = 26;
+  const minEdges = W * 0.10;
+  const minSide = W * 0.025;
   const midL = W * 0.45, midR = W * 0.55;
   let run = 0, bestRun = 0, bestEnd = -1;
   for (let y = 0; y < H; y++) {
@@ -401,7 +401,7 @@ function findBarcodeBand(source, sw, sh) {
     if (dense) { run++; if (run > bestRun) { bestRun = run; bestEnd = y; } }
     else run = 0;
   }
-  if (bestRun < Math.max(12, H * 0.025)) return null;
+  if (bestRun < Math.max(28, H * 0.05)) return null;   // require a TALL band (excludes thin MRZ lines)
   return { y0: Math.floor((bestEnd - bestRun + 1) / scale), y1: Math.ceil(bestEnd / scale) };
 }
 
@@ -596,11 +596,15 @@ async function processImage(file) {
     dbgClear(); dbg('Image ' + W + '×' + H + ' — analyzing…');
     setResult('scanning', 'Analyzing…', '');
 
-    // 1) Barcode decode on the whole image (native → ZXing → preprocessed variants)
+    // 1) Decode the barcode — full image, then the upscaled bottom strip (where it usually sits).
     statusEl.textContent = 'Looking for a barcode…';
     let text = await decodeBarcode(img, W, H);
+    if (!text) {
+      dbg('Full-image decode failed; trying upscaled bottom strip…');
+      text = await decodeCanvas(cropCanvas(img, W, H, Math.floor(H * 0.45), H, 2000));
+    }
     if (text) { dbg('Barcode DECODED: ' + text.replace(/[\r\n]+/g, ' ').slice(0, 60) + '…'); handleBarcode(text); done(); return; }
-    dbg('No barcode decoded on full image.');
+    dbg('No barcode decoded.');
 
     // 2) A barcode BAND present means it's a barcode — NOT an MRZ (the band is found via strong-edge
     //    density, which an MRZ's plain text never reaches). Try to decode a tight, upscaled crop;
