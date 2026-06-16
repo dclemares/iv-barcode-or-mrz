@@ -130,7 +130,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v15 (detect MRZ by < chevrons)';
+const VERSION = 'build 2026-06-16 · v16 (barcode band wins over MRZ)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm: ready (strong PDF417 decoder)'));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -602,29 +602,26 @@ async function processImage(file) {
     if (text) { dbg('Barcode DECODED: ' + text.replace(/[\r\n]+/g, ' ').slice(0, 60) + '…'); handleBarcode(text); done(); return; }
     dbg('No barcode decoded on full image.');
 
-    // 2) Locate the barcode band and retry decoding on a tight, upscaled crop (big improvement)
+    // 2) A barcode BAND present means it's a barcode — NOT an MRZ (the band is found via strong-edge
+    //    density, which an MRZ's plain text never reaches). Try to decode a tight, upscaled crop;
+    //    otherwise report an unreadable barcode. Either way we do NOT fall through to MRZ — barcode
+    //    noise OCRs as '<'-laden garbage and would false-trigger MRZ.
     const band = findBarcodeBand(img, W, H);
     if (band) {
-      dbg('Barcode band at y≈' + band.y0 + '–' + band.y1 + ' → retrying on crop…');
+      dbg('Barcode band at y≈' + band.y0 + '–' + band.y1 + ' → it is a barcode; retrying decode on crop…');
       text = await decodeCanvas(cropCanvas(img, W, H, band.y0, band.y1));
       if (text) { dbg('DECODED from crop: ' + text.replace(/[\r\n]+/g, ' ').slice(0, 60) + '…'); handleBarcode(text); done(); return; }
-    } else {
-      dbg('No barcode band found.');
+      dbg('→ Result: barcode present but unreadable');
+      setResult('aamva', 'BARCODE (unreadable)',
+                'A barcode is present but its content could not be read — use a clearer / higher-resolution image');
+      done(); return;
     }
+    dbg('No barcode band found.');
 
-    // 3) MRZ
+    // 3) No barcode at all → check for MRZ (now safe from barcode '<' noise)
     statusEl.textContent = 'Looking for MRZ…';
     if (await detectMRZ(img, W, H)) { dbg('→ Result: MRZ'); setResult('mrz', 'MRZ', 'Machine-readable zone detected'); done(); return; }
     dbg('→ MRZ pattern not matched.');
-
-    // 4) A barcode is clearly present but couldn't be decoded, and there's no MRZ → likely Colombia
-    if (band) {
-      // We can't tell AAMVA (US/Canada) from Colombia without reading the content, so we DON'T guess.
-      dbg('→ Result: barcode present but unreadable (type unknown)');
-      setResult('aamva', 'BARCODE (unreadable)',
-                'A barcode is present but its content could not be read — move closer / better light');
-      done(); return;
-    }
 
     dbg('→ Result: Not detected');
     setResult('notfound', 'Not detected', 'No barcode or MRZ found in the image');
