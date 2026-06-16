@@ -133,7 +133,7 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v25 (MRZ band no longer misread as barcode)';
+const VERSION = 'build 2026-06-16 · v27 (tolerant MRZ for phone-photo OCR)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm ready: ' + (window.__zxingReadBarcodes ? 'OK — strong PDF417 decoder active' : 'FUNCTION MISSING')));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -265,6 +265,15 @@ function looksLikeMRZ(text) {
     const chevrons = (joined.match(/</g) || []).length;
     if (chevrons >= 5 && /<{2,}/.test(joined)) return true;
   }
+  // Tolerant pass: phone-photo OCR drifts MRZ line lengths and drops chevron filler. Accept TWO
+  // long MRZ-charset lines (28-52 chars) whose combined '<' count is clearly MRZ-like — a '<<'
+  // filler run plus a few chevrons, or simply many chevrons. Normal text / barcodes have no '<'.
+  const longLines = cleanedLines.filter(l => l.length >= 28 && l.length <= 52);
+  if (longLines.length >= 2) {
+    const joined = longLines.join('');
+    const chevrons = (joined.match(/</g) || []).length;
+    if ((/<{2,}/.test(joined) && chevrons >= 4) || chevrons >= 6) return true;
+  }
   for (const line of cleanedLines) {
     const chevrons = (line.match(/</g) || []).length;
     if (line.length >= 16 && chevrons >= 5 && /<{2,}/.test(line) && /[A-Z0-9]{3}/.test(line)) {
@@ -279,6 +288,16 @@ function mrzLineFamily(length) {
   if (length >= 34 && length <= 37) return 36; // TD2
   if (length >= 40 && length <= 48) return 44; // TD3, allowing OCR to add a few stray chars
   return 0;
+}
+
+// Privacy-safe MRZ diagnostic: for each cleaned OCR line, "length-ch / chevrons< / family" —
+// NO actual characters, so we can see WHY looksLikeMRZ matches or not without logging any PII.
+function mrzShapeDebug(text) {
+  const lines = String(text || '').toUpperCase().split(/\r?\n/)
+    .map(l => l.replace(/[^A-Z0-9<]/g, ''))
+    .filter(l => l.length >= 10);
+  if (!lines.length) return '(no A-Z0-9< lines >=10)';
+  return lines.map(l => l.length + 'ch/' + (l.match(/</g) || []).length + '</f' + mrzLineFamily(l.length)).join('  ');
 }
 
 function looksLikeColombianIdBarcodeBand(sw, sh, band) {
@@ -654,6 +673,7 @@ async function detectMRZ(source, sw, sh) {
 	    try {
 	      const { data } = await ocrWorker.recognize(ocrCanvas(source, sw, sh, targetW, cropTop, true));
 	      dbgPayload('MRZ OCR top=' + cropTop, data.text || '');
+      dbg('MRZ shape top=' + cropTop + ': ' + mrzShapeDebug(data.text || ''));
 	      allText += '\n' + (data.text || '');
 	      if (looksLikeMRZ(data.text)) return true;
     } catch (e) { dbg('OCR error (top=' + cropTop + '): ' + (e.message || e)); }

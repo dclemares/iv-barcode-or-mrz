@@ -73,6 +73,20 @@ test('MRZ matcher tolerates OCR line length drift and strong partial MRZ lines',
   assert.equal(looksLikeMRZ('noise <<<<< noise'), false);
 });
 
+test('MRZ matcher tolerates phone-photo OCR: length drift + dropped chevron filler', () => {
+  const { looksLikeMRZ } = loadClassifier();
+  // Reproduces a real US-passport capture: OCR drifts the two TD3 lines to different length
+  // families (48 → 44, ~36 → 36) and drops most of the chevron filler, so the strict same-family
+  // ≥5-chevron check fails. The tolerant long-line pass should still recognize it as an MRZ.
+  const degraded =
+    'P<USAWATKINS<<NATHAN<JAMESXXXXXXXXXXXXXXXXXXXXXX\n' +   // 48 chars, has '<<', 4 chevrons
+    '6536974864USA0002255M29121761842017X';                 // 36 chars, no chevrons
+  assert.equal(looksLikeMRZ(degraded), true);
+  // Must NOT regress: short non-MRZ text stays false.
+  assert.equal(looksLikeMRZ('AAAAAAAAAAAAAAAAAAAAAAAAAA\nBBBBBBBBBBBBBBBBBBBBBBBBBB'), false);
+  assert.equal(looksLikeMRZ('noise <<<<< noise'), false);
+});
+
 test('barcode band detector has relaxed fallback passes for low-contrast PDF417', () => {
   assert.match(html, /BARCODE_BAND_PASSES/);
   assert.match(html, /delta:\s*18/);

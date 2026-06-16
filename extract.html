@@ -141,7 +141,7 @@ const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 const fieldsEl     = document.getElementById('fields');
 
-const VERSION = 'build 2026-06-16 · extract-v2 (field extraction · LOCAL; MRZ band fix)';
+const VERSION = 'build 2026-06-16 · extract-v3 (field extraction · LOCAL; tolerant MRZ)';
 window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm ready: ' + (window.__zxingReadBarcodes ? 'OK — strong PDF417 decoder active' : 'FUNCTION MISSING')));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
@@ -415,6 +415,15 @@ function looksLikeMRZ(text) {
     const joined = lines.join('');
     const chevrons = (joined.match(/</g) || []).length;
     if (chevrons >= 5 && /<{2,}/.test(joined)) return true;
+  }
+  // Tolerant pass: phone-photo OCR drifts MRZ line lengths and drops chevron filler. Accept TWO
+  // long MRZ-charset lines (28-52 chars) whose combined '<' count is clearly MRZ-like — a '<<'
+  // filler run plus a few chevrons, or simply many chevrons. Normal text / barcodes have no '<'.
+  const longLines = cleanedLines.filter(l => l.length >= 28 && l.length <= 52);
+  if (longLines.length >= 2) {
+    const joined = longLines.join('');
+    const chevrons = (joined.match(/</g) || []).length;
+    if ((/<{2,}/.test(joined) && chevrons >= 4) || chevrons >= 6) return true;
   }
   for (const line of cleanedLines) {
     const chevrons = (line.match(/</g) || []).length;
