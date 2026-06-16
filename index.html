@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>¿Barcode o MRZ?</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0f14; color: #e5e7eb;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #app { position: fixed; inset: 0; display: flex; flex-direction: column; }
+  #stage { position: relative; flex: 1; overflow: hidden; background: #000; }
+  #video { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  /* Guía de encuadre */
+  #guide { position: absolute; left: 8%; right: 8%; top: 28%; bottom: 28%;
+    border: 2px dashed rgba(255,255,255,.35); border-radius: 14px; pointer-events: none; }
+
+  /* Banner de resultado */
+  #overlay { position: absolute; left: 0; right: 0; top: 0; padding: 16px;
+    display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
+  #banner { min-width: 60%; max-width: 92%; text-align: center; padding: 18px 22px;
+    border-radius: 16px; font-size: clamp(22px, 6vw, 40px); font-weight: 800; letter-spacing: .5px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.45); transition: background .15s ease; }
+  #detail { font-size: clamp(12px, 3.5vw, 16px); opacity: .9; text-align: center;
+    background: rgba(0,0,0,.45); padding: 4px 12px; border-radius: 10px; min-height: 1em; }
+
+  .scanning { background: #374151; }
+  .mrz      { background: #2563eb; }
+  .aamva    { background: #16a34a; }
+  .colombia { background: #f59e0b; color: #1f2937; }
+  .error    { background: #dc2626; }
+
+  /* Controles */
+  #controls { display: flex; gap: 10px; align-items: center; padding: 10px 12px;
+    background: #0b0f14; border-top: 1px solid #1f2933; }
+  #cameraSelect { flex: 1; min-width: 0; padding: 10px; border-radius: 10px;
+    background: #1f2933; color: #e5e7eb; border: 1px solid #2d3a47; font-size: 14px; }
+  button { padding: 10px 14px; border-radius: 10px; border: 0; background: #2563eb;
+    color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; }
+  button:active { transform: translateY(1px); }
+  #status { padding: 8px 12px; font-size: 13px; color: #9ca3af; background: #0b0f14;
+    border-top: 1px solid #1f2933; text-align: center; min-height: 1.2em; }
+
+  /* Pantalla de inicio */
+  #start { position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px; background: #0b0f14; z-index: 5; }
+  #start h1 { font-size: clamp(20px, 5vw, 28px); margin: 0; }
+  #start p { max-width: 420px; text-align: center; color: #9ca3af; margin: 0 16px; line-height: 1.5; }
+  #startBtn { font-size: 18px; padding: 14px 24px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="guide"></div>
+    <div id="overlay">
+      <div id="banner" class="scanning">Apunta al documento…</div>
+      <div id="detail"></div>
+    </div>
+    <div id="start">
+      <h1>¿Barcode o MRZ?</h1>
+      <p>Identifica en tiempo real si lo que muestras a la cámara es un <b>MRZ</b>,
+         un <b>barcode de licencia EE.UU./Canadá</b> o un <b>barcode de cédula colombiana</b>.</p>
+      <button id="startBtn">▶ Iniciar cámara</button>
+    </div>
+  </div>
+  <div id="controls">
+    <select id="cameraSelect" title="Cámara"></select>
+    <button id="restartBtn" title="Reiniciar">↻</button>
+  </div>
+  <div id="status">Pulsa «Iniciar cámara».</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+"use strict";
+
+const video        = document.getElementById('video');
+const banner       = document.getElementById('banner');
+const detail       = document.getElementById('detail');
+const statusEl     = document.getElementById('status');
+const cameraSelect = document.getElementById('cameraSelect');
+const startScreen  = document.getElementById('start');
+const startBtn     = document.getElementById('startBtn');
+const restartBtn   = document.getElementById('restartBtn');
+
+let codeReader  = null;   // ZXing
+let ocrWorker   = null;   // Tesseract
+let ocrBusy     = false;
+let lastResultAt  = 0;
+let lastBarcodeAt = -99999;
+const STICKY_MS = 1500;   // cuánto se mantiene el resultado antes de volver a "buscando"
+
+/* ───────────────────── Clasificación ───────────────────── */
+
+// AAMVA (licencias de EE.UU. y Canadá): el PDF417 empieza con '@' y contiene "ANSI " + IIN.
+// La cédula colombiana usa un PDF417 binario propio (Registraduría) que NO lleva esa cabecera.
+function isAAMVA(text) {
+  return text.indexOf('ANSI ') !== -1 || text.charCodeAt(0) === 64; // 64 = '@'
+}
+
+function handleBarcode(text) {
+  lastBarcodeAt = performance.now();
+  if (isAAMVA(text)) {
+    const i = text.indexOf('ANSI ');
+    const iin = i !== -1 ? text.substr(i + 5, 6) : '';
+    setResult('aamva', 'BARCODE · EE.UU./Canadá',
+              iin ? ('Licencia AAMVA (PDF417) · emisor IIN ' + iin) : 'Licencia AAMVA (PDF417)');
+  } else {
+    setResult('colombia', 'BARCODE · Colombia', 'Cédula (PDF417 propietario, no-AAMVA)');
+  }
+}
+
+// Reconoce la "forma" de un MRZ sin necesidad de leerlo perfecto:
+// 2-3 líneas largas, monoespaciadas, casi solo [A-Z0-9<] y con relleno '<<'.
+function looksLikeMRZ(text) {
+  const lines = text.split('\n')
+    .map(l => l.replace(/\s+/g, '').toUpperCase())
+    .filter(l => l.length > 0);
+  let mrzLines = 0, hasDoubleFiller = false;
+  for (const line of lines) {
+    if (line.length < 24 || line.length > 48) continue;
+    const allowed = (line.match(/[A-Z0-9<]/g) || []).length;
+    const fillers = (line.match(/</g) || []).length;
+    if (allowed / line.length >= 0.85 && fillers >= 2) {
+      mrzLines++;
+      if (line.indexOf('<<') !== -1) hasDoubleFiller = true;
+    }
+  }
+  return mrzLines >= 2 && hasDoubleFiller;
+}
+
+/* ───────────────────── UI ───────────────────── */
+
+function setResult(cls, text, sub) {
+  lastResultAt = performance.now();
+  banner.className = cls;
+  banner.textContent = text;
+  detail.textContent = sub || '';
+}
+
+function showFatal(msg) {
+  banner.className = 'error';
+  banner.textContent = 'Error';
+  detail.textContent = '';
+  statusEl.textContent = msg;
+}
+
+// Vuelve a "buscando" si pasa un rato sin nuevas detecciones.
+setInterval(() => {
+  if (performance.now() - lastResultAt > STICKY_MS && banner.className !== 'error') {
+    banner.className = 'scanning';
+    banner.textContent = 'Apunta al documento…';
+    detail.textContent = '';
+  }
+}, 300);
+
+/* ───────────────────── Barcode (ZXing / PDF417) ───────────────────── */
+
+const hints = new Map();
+hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.PDF_417]);
+hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+async function startScanner(deviceId) {
+  if (codeReader) { try { codeReader.reset(); } catch (e) {} }
+  codeReader = new ZXing.BrowserMultiFormatReader(hints, 150);
+  await codeReader.decodeFromVideoDevice(deviceId || undefined, video, (result) => {
+    if (result) handleBarcode(result.getText());
+  });
+}
+
+/* ───────────────────── MRZ (Tesseract OCR) ───────────────────── */
+
+const work = document.createElement('canvas');
+const wctx = work.getContext('2d', { willReadFrequently: true });
+
+function captureFrame() {
+  if (!video.videoWidth) return null;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const targetW = Math.min(960, vw);
+  const scale = targetW / vw;
+  const targetH = Math.round(vh * scale);
+  work.width = targetW; work.height = targetH;
+  wctx.drawImage(video, 0, 0, vw, vh, 0, 0, targetW, targetH);
+  const img = wctx.getImageData(0, 0, targetW, targetH);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {        // escala de grises (ayuda al OCR)
+    const g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    d[i] = d[i + 1] = d[i + 2] = g;
+  }
+  wctx.putImageData(img, 0, 0);
+  return work;
+}
+
+async function initOCR() {
+  statusEl.textContent = 'Cargando motor MRZ…';
+  ocrWorker = await Tesseract.createWorker('eng');
+  await ocrWorker.setParameters({
+    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
+    tessedit_pageseg_mode: '6'   // bloque uniforme de texto
+  });
+  statusEl.textContent = 'Listo. Apunta al documento.';
+}
+
+async function ocrTick() {
+  if (!ocrWorker || ocrBusy) return;
+  // El barcode tiene prioridad: si acabamos de ver uno, no malgastamos OCR.
+  if (performance.now() - lastBarcodeAt < 1200) return;
+  const canvas = captureFrame();
+  if (!canvas) return;
+  ocrBusy = true;
+  try {
+    const { data } = await ocrWorker.recognize(canvas);
+    if (looksLikeMRZ(data.text) && performance.now() - lastBarcodeAt > 1000) {
+      setResult('mrz', 'MRZ', 'Zona de lectura mecánica detectada');
+    }
+  } catch (e) { /* ignorar fallos puntuales de OCR */ }
+  ocrBusy = false;
+}
+setInterval(ocrTick, 700);
+
+/* ───────────────────── Cámara / arranque ───────────────────── */
+
+async function listCameras(preferredId) {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const cams = devices.filter(d => d.kind === 'videoinput');
+  cameraSelect.innerHTML = '';
+  cams.forEach((c, i) => {
+    const opt = document.createElement('option');
+    opt.value = c.deviceId;
+    opt.textContent = c.label || ('Cámara ' + (i + 1));
+    cameraSelect.appendChild(opt);
+  });
+  if (preferredId) cameraSelect.value = preferredId;
+}
+
+async function main() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showFatal('Este navegador no soporta acceso a la cámara.');
+    return;
+  }
+  const localhost = ['localhost', '127.0.0.1'].includes(location.hostname);
+  if (!window.isSecureContext && !localhost) {
+    showFatal('La cámara necesita https o localhost. No abras el archivo con doble clic (file://); sírvelo con un servidor local. Ver README.');
+    return;
+  }
+  try {
+    // 1) Permiso + cámara trasera por defecto (en móvil).
+    const tmp = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
+    const preferred = tmp.getVideoTracks()[0].getSettings().deviceId;
+    tmp.getTracks().forEach(t => t.stop());
+    await listCameras(preferred);
+    // 2) Arrancar escáner de barcode + OCR de MRZ.
+    await startScanner(cameraSelect.value || preferred);
+    initOCR();
+    statusEl.textContent = 'Buscando barcode o MRZ…';
+  } catch (e) {
+    showFatal('No se pudo acceder a la cámara: ' + (e && e.message ? e.message : e));
+  }
+}
+
+startBtn.addEventListener('click', () => {
+  startScreen.style.display = 'none';
+  main();
+});
+cameraSelect.addEventListener('change', () => startScanner(cameraSelect.value));
+restartBtn.addEventListener('click', () => startScanner(cameraSelect.value));
+</script>
+</body>
+</html>
