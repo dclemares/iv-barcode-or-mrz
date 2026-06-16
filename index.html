@@ -110,9 +110,10 @@
         ? 'https://cdn.jsdelivr.net/npm/zxing-wasm@1.3.5/dist/reader/zxing_reader.wasm'
         : prefix + path
     });
-    window.__zxingReadBarcodes = m.readBarcodes;
+    // v1.3.5 has NO unified readBarcodes — it's readBarcodesFromImageData / readBarcodesFromImageFile.
+    window.__zxingReadBarcodes = m.readBarcodesFromImageData || m.readBarcodes;
     window.dispatchEvent(new Event('zxingwasm-ready'));
-  } catch (e) { console.log('zxing-wasm load failed', e); }
+  } catch (e) { window.__zxingError = String(e); console.log('zxing-wasm load failed', e); }
 </script>
 <script>
 "use strict";
@@ -130,8 +131,8 @@ const photo        = document.getElementById('photo');
 const debugEl      = document.getElementById('debug');
 const dbgBtn       = document.getElementById('dbgBtn');
 
-const VERSION = 'build 2026-06-16 · v17 (decode bottom strip + robust band)';
-window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm: ready (strong PDF417 decoder)'));
+const VERSION = 'build 2026-06-16 · v18 (FIX zxing-wasm fn name)';
+window.addEventListener('zxingwasm-ready', () => dbg('zxing-wasm ready: ' + (window.__zxingReadBarcodes ? 'OK — strong PDF417 decoder active' : 'FUNCTION MISSING')));
 function dbg(msg) {
   debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
   debugEl.scrollTop = debugEl.scrollHeight;
@@ -335,8 +336,19 @@ async function wasmDecode(canvas) {
   try {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const res = await window.__zxingReadBarcodes(imgData, { formats: ['PDF417'], tryHarder: true, maxNumberOfSymbols: 1 });
-    if (res && res.length && res[0].text) return res[0].text;
+    const res = await window.__zxingReadBarcodes(imgData, {
+      formats: ['PDF417'], tryHarder: true, tryRotate: true, tryInvert: true,
+      tryDownscale: true, maxNumberOfSymbols: 1
+    });
+    if (res && res.length && res[0].isValid !== false) {
+      let t = res[0].text;
+      // Colombian cédula PDF417 is binary → .text may be empty; rebuild from bytes so it's non-empty
+      // (and, having no "ANSI " header, gets classified as Colombia).
+      if (!t && res[0].bytes && res[0].bytes.length) {
+        t = Array.from(res[0].bytes).map(b => String.fromCharCode(b)).join('');
+      }
+      if (t) return t;
+    }
   } catch (e) { dbg('wasm error: ' + (e.message || e)); }
   return null;
 }
